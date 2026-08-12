@@ -1,0 +1,59 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
+pip-wheel-metadata/
+
+# SQLite database / local data
+attendance.db
+*.sqlite3
+*.db
+
+# Face recognition runtime data
+known_faces/
+uploads/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Flask / development
+instance/
+.webassets-cache
+
+# IDE / editor files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test / cache
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
