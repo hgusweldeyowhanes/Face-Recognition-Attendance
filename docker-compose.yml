@@ -1,0 +1,21 @@
+services:
+  presence:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_ENV: production
+      FLASK_DEBUG: "False"
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production-use-openssl-rand}
+      HOST: 0.0.0.0
+      PORT: 5000
+      DATABASE_PATH: /data/attendance.db
+      FACES_FOLDER: /data/known_faces
+      UPLOAD_FOLDER: /data/uploads
+      CORS_ORIGINS: "*"
+    volumes:
+      - presence-data:/data
+    restart: unless-stopped
+
+volumes:
+  presence-data:

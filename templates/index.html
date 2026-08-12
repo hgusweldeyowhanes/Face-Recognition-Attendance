@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Presence — face recognition attendance for classrooms">
+    <title>Presence</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="ambient" aria-hidden="true"></div>
+
+    <header class="topbar">
+        <div class="topbar-inner">
+            <a class="brand" href="/" aria-label="Presence home">
+                <span class="brand-mark" aria-hidden="true"></span>
+                <span class="brand-text">Presence</span>
+            </a>
+            <nav class="nav" role="tablist" aria-label="Main">
+                <button type="button" class="nav-btn active" data-page="dashboard" role="tab" aria-selected="true">Overview</button>
+                <button type="button" class="nav-btn" data-page="attendance" role="tab" aria-selected="false">Check in</button>
+                <button type="button" class="nav-btn" data-page="register" role="tab" aria-selected="false">Register</button>
+                <button type="button" class="nav-btn" data-page="reports" role="tab" aria-selected="false">Reports</button>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <!-- Overview -->
+        <section id="dashboard" class="page active" aria-label="Overview">
+            <div class="shell">
+                <header class="page-head">
+                    <div>
+                        <p class="eyebrow">Today</p>
+                        <h1>Classroom overview</h1>
+                        <p class="lede">Live attendance across registered classes.</p>
+                    </div>
+                    <button type="button" class="btn btn-ghost" id="refreshDashboardBtn">Refresh</button>
+                </header>
+
+                <div class="stat-row">
+                    <article class="stat" id="totalStudentsCard">
+                        <p class="stat-label">Students</p>
+                        <p class="stat-value">0</p>
+                    </article>
+                    <article class="stat accent" id="presentTodayCard">
+                        <p class="stat-label">Present</p>
+                        <p class="stat-value">0</p>
+                    </article>
+                    <article class="stat muted" id="absentTodayCard">
+                        <p class="stat-label">Absent</p>
+                        <p class="stat-value">0</p>
+                    </article>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>By class</h2>
+                    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Class</th>
+                                    <th>Total</th>
+                                    <th>Present</th>
+                                    <th>Absent</th>
+                                    <th>Rate</th>
+                                </tr>
+                            </thead>
+                            <tbody id="summaryBody">
+                                <tr><td colspan="5" class="empty">Loading…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Check in -->
+        <section id="attendance" class="page" aria-label="Check in" hidden>
+            <div class="shell">
+                <header class="page-head">
+                    <div>
+                        <p class="eyebrow">Recognition</p>
+                        <h1>Check in</h1>
+                        <p class="lede">Capture a face from camera or upload a photo.</p>
+                    </div>
+                </header>
+
+                <div class="checkin-layout">
+                    <div class="panel camera-panel">
+                        <div class="camera-frame">
+                            <video id="cameraFeed" autoplay playsinline muted></video>
+                            <div class="camera-guide" aria-hidden="true"></div>
+                            <p class="camera-hint" id="cameraHint">Camera off</p>
+                        </div>
+                        <canvas id="canvas" hidden></canvas>
+                        <div class="actions">
+                            <button type="button" id="cameraToggleBtn" class="btn btn-secondary">Start camera</button>
+                            <button type="button" id="captureBtn" class="btn btn-primary" disabled>Capture &amp; recognize</button>
+                        </div>
+                    </div>
+
+                    <div class="side-stack">
+                        <div class="panel">
+                            <h2>Or upload</h2>
+                            <div class="upload-zone">
+                                <input type="file" id="imageUpload" accept="image/jpeg,image/png,image/webp">
+                                <button type="button" id="uploadBtn" class="btn btn-secondary">Recognize upload</button>
+                            </div>
+                        </div>
+
+                        <div id="recognitionResult" class="result-panel" aria-live="polite">
+                            <div id="resultContent" class="result-content">
+                                <p class="result-idle">Results appear here after a scan.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Register -->
+        <section id="register" class="page" aria-label="Register" hidden>
+            <div class="shell">
+                <header class="page-head">
+                    <div>
+                        <p class="eyebrow">Enrollment</p>
+                        <h1>Register student</h1>
+                        <p class="lede">Add a clear front-facing photo with their details.</p>
+                    </div>
+                </header>
+
+                <div class="register-layout">
+                    <form id="registrationForm" class="panel form-panel">
+                        <div class="field">
+                            <label for="studentId">Student ID</label>
+                            <input type="text" id="studentId" name="studentId" required
+                                   pattern="[A-Za-z0-9._-]+" maxlength="64"
+                                   placeholder="e.g. MI-01"
+                                   title="Letters, numbers, dash, underscore, or dot only">
+                            <span class="hint">No slashes — use MI-01 not MI-01/2018</span>
+                        </div>
+                        <div class="field">
+                            <label for="studentName">Full name</label>
+                            <input type="text" id="studentName" name="studentName" required maxlength="120">
+                        </div>
+                        <div class="field">
+                            <label for="studentEmail">Email <span class="optional">optional</span></label>
+                            <input type="email" id="studentEmail" name="studentEmail" maxlength="200">
+                        </div>
+                        <div class="field">
+                            <label for="studentClass">Class</label>
+                            <input type="text" id="studentClass" name="studentClass" required maxlength="80" placeholder="e.g. Grade 10A">
+                        </div>
+                        <div class="field">
+                            <label for="facePhoto">Face photo</label>
+                            <div class="photo-box">
+                                <input type="file" id="facePhoto" name="facePhoto" accept="image/jpeg,image/png,image/webp" required>
+                                <img id="photoPreview" class="photo-preview" alt="Face preview" hidden>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary" id="registerSubmitBtn">Register student</button>
+                    </form>
+
+                    <div class="panel">
+                        <div class="panel-head">
+                            <h2>Roster</h2>
+                        </div>
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Name</th>
+                                        <th>Email</th>
+                                        <th>Class</th>
+                                        <th>Joined</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="studentsBody">
+                                    <tr><td colspan="5" class="empty">Loading…</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Reports -->
+        <section id="reports" class="page" aria-label="Reports" hidden>
+            <div class="shell">
+                <header class="page-head">
+                    <div>
+                        <p class="eyebrow">Exports</p>
+                        <h1>Attendance reports</h1>
+                        <p class="lede">Filter by date and class, then export CSV.</p>
+                    </div>
+                </header>
+
+                <div class="panel">
+                    <div class="filters">
+                        <div class="field">
+                            <label for="reportDate">Date</label>
+                            <input type="date" id="reportDate">
+                        </div>
+                        <div class="field">
+                            <label for="reportClass">Class</label>
+                            <select id="reportClass">
+                                <option value="">All classes</option>
+                            </select>
+                        </div>
+                        <div class="filter-actions">
+                            <button type="button" id="generateReportBtn" class="btn btn-primary">Generate</button>
+                            <button type="button" id="exportReportBtn" class="btn btn-secondary">Export CSV</button>
+                        </div>
+                    </div>
+
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Student ID</th>
+                                    <th>Name</th>
+                                    <th>Class</th>
+                                    <th>Date</th>
+                                    <th>Time in</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="reportBody">
+                                <tr><td colspan="6" class="empty">Select a date and generate a report</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <div id="toast-root" class="toast-root" aria-live="polite"></div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
