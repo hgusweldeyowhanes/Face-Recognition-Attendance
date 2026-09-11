@@ -259,7 +259,7 @@ def add_student(student_id, name, email, class_name, face_path):
         return False, 'Registration failed' if FLASK_ENV == 'production' else str(e)
 
 
-def mark_attendance(student_id, date, time_in, status='Present'):
+def mark_attendance(student_id, date, time_in, status='Present', time_out=None):
     try:
         conn = get_db()
         existing = conn.execute(
@@ -268,14 +268,14 @@ def mark_attendance(student_id, date, time_in, status='Present'):
         ).fetchone()
         if existing:
             conn.execute(
-                'UPDATE attendance SET time_in = ?, status = ? WHERE student_id = ? AND date = ?',
-                (time_in, status, student_id, date),
+                'UPDATE attendance SET time_in = ?, time_out = COALESCE(?, time_out), status = ? WHERE student_id = ? AND date = ?',
+                (time_in, time_out, status, student_id, date),
             )
         else:
             conn.execute(
-                '''INSERT INTO attendance (student_id, date, time_in, status)
-                   VALUES (?, ?, ?, ?)''',
-                (student_id, date, time_in, status),
+                '''INSERT INTO attendance (student_id, date, time_in, time_out, status)
+                   VALUES (?, ?, ?, ?, ?)''',
+                (student_id, date, time_in, time_out, status),
             )
         conn.commit()
         conn.close()
@@ -283,6 +283,35 @@ def mark_attendance(student_id, date, time_in, status='Present'):
     except Exception:
         logger.exception('Failed to mark attendance')
         return False
+
+
+def check_out_student(student_id, date=None, time_out=None):
+    student_id = sanitize_id(student_id)
+    if not student_id:
+        return False, 'Invalid student ID'
+    if not time_out:
+        time_out = datetime.now().strftime('%H:%M:%S')
+    if not date:
+        date = datetime.now().strftime('%Y-%m-%d')
+    try:
+        conn = get_db()
+        row = conn.execute(
+            'SELECT id FROM attendance WHERE student_id = ? AND date = ?',
+            (student_id, date),
+        ).fetchone()
+        if not row:
+            conn.close()
+            return False, 'No attendance record found for today'
+        conn.execute(
+            'UPDATE attendance SET time_out = ?, status = ? WHERE student_id = ? AND date = ?',
+            (time_out, 'Present', student_id, date),
+        )
+        conn.commit()
+        conn.close()
+        return True, 'Checked out successfully'
+    except Exception:
+        logger.exception('Failed to check out')
+        return False, 'Check-out failed'
 
 
 def send_notification(student_id, message_type, message):
@@ -522,6 +551,27 @@ def get_attendance_summary():
     } for r in rows])
 
 
+@app.route('/api/attendance/check-out', methods=['POST'])
+def check_out_api():
+    payload = request.get_json(silent=True) or request.form.to_dict(flat=True)
+    student_id = (payload or {}).get('student_id') or request.form.get('student_id')
+    time_out = (payload or {}).get('time_out') or request.form.get('time_out')
+
+    if not student_id:
+        return api_error('student_id is required', 400)
+
+    success, message = check_out_student(student_id, time_out=time_out)
+    if not success:
+        return api_error(message, 400)
+
+    return jsonify({
+        'success': True,
+        'message': message,
+        'student_id': sanitize_id(student_id),
+        'time_out': time_out or datetime.now().strftime('%H:%M:%S'),
+    })
+
+
 @app.route('/api/student/<student_id>/history', methods=['GET'])
 def get_student_history(student_id):
     days = request.args.get('days', 30, type=int)
@@ -529,7 +579,7 @@ def get_student_history(student_id):
     date_from = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
     conn = get_db()
     rows = conn.execute(
-        '''SELECT date, time_in, status FROM attendance
+        '''SELECT date, time_in, time_out, status FROM attendance
            WHERE student_id = ? AND date >= ?
            ORDER BY date DESC''',
         (sanitize_id(student_id), date_from),
