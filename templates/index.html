@@ -13,6 +13,24 @@
 <body>
     <div class="ambient" aria-hidden="true"></div>
 
+    <main id="staffLoginPage" class="shell login-page">
+        <form id="staffLoginForm" class="panel login-panel">
+            <p class="eyebrow">Staff access</p>
+            <h1>Sign in to Presence</h1>
+            <p class="lede">Use your teacher or administrator account to continue.</p>
+            <div class="field">
+                <label for="loginUsername">Username</label>
+                <input type="text" id="loginUsername" name="username" autocomplete="username" maxlength="64" required>
+            </div>
+            <div class="field">
+                <label for="loginPassword">Password</label>
+                <input type="password" id="loginPassword" name="password" autocomplete="current-password" required>
+            </div>
+            <button type="submit" class="btn btn-primary" id="loginSubmitBtn">Sign in</button>
+        </form>
+    </main>
+
+    <div id="appShell" hidden>
     <header class="topbar">
         <div class="topbar-inner">
             <a class="brand" href="/" aria-label="Presence home">
@@ -22,10 +40,15 @@
             <nav class="nav" role="tablist" aria-label="Main">
                 <button type="button" class="nav-btn active" data-page="dashboard" role="tab" aria-selected="true">Overview</button>
                 <button type="button" class="nav-btn" data-page="sessions" role="tab" aria-selected="false">Sessions</button>
+                <button type="button" class="nav-btn" data-page="staff" role="tab" aria-selected="false" data-admin-only hidden>Staff</button>
                 <button type="button" class="nav-btn" data-page="attendance" role="tab" aria-selected="false">Check in</button>
-                <button type="button" class="nav-btn" data-page="register" role="tab" aria-selected="false">Register</button>
+                <button type="button" class="nav-btn" data-page="register" role="tab" aria-selected="false" data-admin-only hidden>Register</button>
                 <button type="button" class="nav-btn" data-page="reports" role="tab" aria-selected="false">Reports</button>
             </nav>
+            <div class="staff-identity">
+                <span id="staffIdentity"></span>
+                <button type="button" class="btn btn-ghost btn-small" id="logoutBtn">Sign out</button>
+            </div>
         </div>
     </header>
 
@@ -129,6 +152,47 @@
                                 <tr><td colspan="8" class="empty">Loading…</td></tr>
                             </tbody>
                         </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Staff administration -->
+        <section id="staff" class="page" aria-label="Staff administration" hidden>
+            <div class="shell">
+                <header class="page-head">
+                    <div>
+                        <p class="eyebrow">Administrator</p>
+                        <h1>Staff accounts</h1>
+                        <p class="lede">Create teacher accounts. New staff receive the password you set and can sign in immediately.</p>
+                    </div>
+                    <button type="button" class="btn btn-ghost" id="refreshStaffBtn">Refresh</button>
+                </header>
+
+                <div class="register-layout">
+                    <form id="createTeacherForm" class="panel form-panel">
+                        <h2>Create teacher account</h2>
+                        <div class="field">
+                            <label for="teacherUsername">Username</label>
+                            <input type="text" id="teacherUsername" minlength="3" maxlength="64" pattern="[A-Za-z0-9._-]+" autocomplete="off" required>
+                        </div>
+                        <div class="field">
+                            <label for="teacherPassword">Temporary password</label>
+                            <input type="password" id="teacherPassword" minlength="12" autocomplete="new-password" required>
+                            <span class="hint">At least 12 characters. Share it securely with the teacher.</span>
+                        </div>
+                        <button type="submit" class="btn btn-primary" id="createTeacherBtn">Create teacher</button>
+                    </form>
+                    <div class="panel">
+                        <div class="panel-head"><h2>Accounts</h2></div>
+                        <div class="table-wrap">
+                            <table>
+                                <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th></tr></thead>
+                                <tbody id="staffUsersBody">
+                                    <tr><td colspan="4" class="empty">Loading…</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -302,6 +366,7 @@
             </div>
         </section>
     </main>
+    </div>
 
     <div id="toast-root" class="toast-root" aria-live="polite"></div>
     <script src="{{ url_for('static', filename='script.js') }}"></script>

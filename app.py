@@ -1,7 +1,9 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, g, render_template, request, jsonify, session as staff_session
 from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.utils import secure_filename
+from werkzeug.security import check_password_hash, generate_password_hash
+import click
 import sqlite3
 import os
 import re
@@ -50,13 +52,26 @@ MAIL_PASSWORD = os.getenv('MAIL_PASSWORD', '')
 HOST = os.getenv('HOST', '127.0.0.1')
 PORT = int(os.getenv('PORT', '5000'))
 
-if FLASK_ENV == 'production' and SECRET_KEY in ('dev-secret-key-change-me', 'your-secret-key-here', 'dev-secret-key'):
-    raise RuntimeError('Set a strong SECRET_KEY before running in production')
+if FLASK_ENV == 'production' and (
+    len(SECRET_KEY) < 32
+    or SECRET_KEY in (
+        'dev-secret-key-change-me',
+        'your-secret-key-here',
+        'dev-secret-key',
+        'change-this-to-a-long-random-string',
+        'change-me-in-production-use-openssl-rand',
+    )
+):
+    raise RuntimeError('Set a strong SECRET_KEY of at least 32 characters before running in production')
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 app.config['MAX_CONTENT_LENGTH'] = int(MAX_UPLOAD_MB * 1024 * 1024)
 app.config['JSON_SORT_KEYS'] = False
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = FLASK_ENV == 'production'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 
 if CORS_ORIGINS == ['*']:
     CORS(app)
@@ -88,6 +103,14 @@ def init_db():
         email TEXT,
         class_name TEXT,
         face_encoding BLOB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS staff_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('admin', 'teacher')),
+        active INTEGER NOT NULL DEFAULT 1,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS class_sessions (
@@ -457,6 +480,69 @@ def api_error(message, status=400):
     return jsonify({'success': False, 'message': message}), status
 
 
+@app.before_request
+def require_staff_api_session():
+    if not request.path.startswith('/api/') or request.path == '/api/auth/login':
+        return None
+
+    origin = request.headers.get('Origin')
+    if origin and origin.rstrip('/') != request.host_url.rstrip('/'):
+        return api_error('Cross-origin requests are not allowed', 403)
+
+    user_id = staff_session.get('staff_user_id')
+    if not user_id:
+        return api_error('Sign in required', 401)
+
+    conn = get_db()
+    user = conn.execute(
+        'SELECT id, username, role, active FROM staff_users WHERE id = ?',
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    if not user or not user['active']:
+        staff_session.clear()
+        return api_error('Sign in required', 401)
+
+    g.staff_user = dict(user)
+    return None
+
+
+def require_role(*roles):
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if g.staff_user['role'] not in roles:
+                return api_error('Insufficient permissions', 403)
+            return view(*args, **kwargs)
+        return wrapped
+    return decorator
+
+
+@app.cli.command('create-admin')
+def create_admin_command():
+    """Create an administrator account from the command line."""
+    username = click.prompt('Admin username').strip().lower()
+    if not re.fullmatch(r'[a-zA-Z0-9._-]{3,64}', username):
+        raise click.ClickException('Use 3-64 letters, numbers, dots, dashes, or underscores.')
+
+    password = click.prompt('Admin password', hide_input=True, confirmation_prompt=True)
+    if len(password) < 12:
+        raise click.ClickException('Password must be at least 12 characters.')
+
+    conn = get_db()
+    try:
+        conn.execute(
+            'INSERT INTO staff_users (username, password_hash, role) VALUES (?, ?, ?)',
+            (username, generate_password_hash(password), 'admin'),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise click.ClickException('That username already exists.')
+    finally:
+        conn.close()
+    click.echo(f'Administrator "{username}" created.')
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -483,6 +569,99 @@ def health():
         'env': FLASK_ENV,
         'timestamp': datetime.utcnow().isoformat() + 'Z',
     }), status
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def staff_login():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return api_error('Request body must be a JSON object')
+    raw_username = payload.get('username')
+    password = payload.get('password')
+    if not isinstance(raw_username, str) or not isinstance(password, str):
+        return api_error('Username and password are required')
+    username = raw_username.strip().lower()
+    if not username or not password:
+        return api_error('Username and password are required')
+
+    conn = get_db()
+    user = conn.execute(
+        'SELECT id, username, password_hash, role, active FROM staff_users WHERE username = ?',
+        (username,),
+    ).fetchone()
+    conn.close()
+    if not user or not user['active'] or not check_password_hash(user['password_hash'], password):
+        return api_error('Invalid username or password', 401)
+
+    staff_session.clear()
+    staff_session['staff_user_id'] = user['id']
+    staff_session.permanent = True
+    return jsonify({
+        'success': True,
+        'user': {'id': user['id'], 'username': user['username'], 'role': user['role']},
+    })
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+def staff_logout():
+    staff_session.clear()
+    return jsonify({'success': True})
+
+
+@app.route('/api/auth/me', methods=['GET'])
+def staff_me():
+    return jsonify({
+        'user': {
+            'id': g.staff_user['id'],
+            'username': g.staff_user['username'],
+            'role': g.staff_user['role'],
+        },
+    })
+
+
+@app.route('/api/admin/users', methods=['GET'])
+@require_role('admin')
+def list_staff_users():
+    conn = get_db()
+    users = conn.execute(
+        'SELECT id, username, role, active, created_at FROM staff_users ORDER BY username'
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(user) for user in users])
+
+
+@app.route('/api/admin/users', methods=['POST'])
+@require_role('admin')
+def create_teacher():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return api_error('Request body must be a JSON object')
+    raw_username = payload.get('username')
+    password = payload.get('password')
+    if not isinstance(raw_username, str) or not isinstance(password, str):
+        return api_error('Username and password are required')
+    username = raw_username.strip().lower()
+    if not re.fullmatch(r'[a-zA-Z0-9._-]{3,64}', username):
+        return api_error('Username must be 3-64 letters, numbers, dots, dashes, or underscores')
+    if len(password) < 12:
+        return api_error('Password must be at least 12 characters')
+
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            'INSERT INTO staff_users (username, password_hash, role) VALUES (?, ?, ?)',
+            (username, generate_password_hash(password), 'teacher'),
+        )
+        conn.commit()
+        user_id = cursor.lastrowid
+    except sqlite3.IntegrityError:
+        return api_error('That username already exists', 409)
+    finally:
+        conn.close()
+    return jsonify({
+        'success': True,
+        'user': {'id': user_id, 'username': username, 'role': 'teacher'},
+    }), 201
 
 
 @app.route('/api/sessions', methods=['GET'])
@@ -604,6 +783,7 @@ def close_session(session_id):
 
 
 @app.route('/api/students', methods=['GET'])
+@require_role('admin')
 def get_students():
     conn = get_db()
     students = conn.execute(
@@ -614,6 +794,7 @@ def get_students():
 
 
 @app.route('/api/students/add', methods=['POST'])
+@require_role('admin')
 def add_student_api():
     if 'image' not in request.files:
         return api_error('No image provided')

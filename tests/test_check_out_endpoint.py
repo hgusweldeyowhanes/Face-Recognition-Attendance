@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime
 
 import app as attendance_app
+from werkzeug.security import generate_password_hash
 
 
 class CheckOutEndpointTests(unittest.TestCase):
@@ -24,15 +25,23 @@ class CheckOutEndpointTests(unittest.TestCase):
                VALUES (?, ?, ?, ?, ?)''',
             ('STU1', datetime.now().strftime('%Y-%m-%d'), '08:00:00', None, 'Present'),
         )
+        conn.execute(
+            'INSERT INTO staff_users (username, password_hash, role) VALUES (?, ?, ?)',
+            ('teacher', generate_password_hash('TeacherPassword123!'), 'teacher'),
+        )
         conn.commit()
         conn.close()
+        self.client = attendance_app.app.test_client()
+        self.client.post(
+            '/api/auth/login',
+            json={'username': 'teacher', 'password': 'TeacherPassword123!'},
+        )
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
     def test_check_out_endpoint_records_time_out(self):
-        client = attendance_app.app.test_client()
-        response = client.post(
+        response = self.client.post(
             '/api/attendance/check-out',
             json={'student_id': 'STU1', 'time_out': '17:30:00'},
         )

@@ -6,7 +6,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupNavigation();
     setupEventListeners();
     setReportDate();
-    loadDashboard();
+    initializeStaffSession();
 });
 
 function setupNavigation() {
@@ -37,6 +37,8 @@ function showPage(pageName, activeBtn) {
     } else if (pageName === 'sessions') {
         loadClasses();
         loadSessions(localDateInputValue());
+    } else if (pageName === 'staff') {
+        loadStaffUsers();
     } else if (pageName === 'dashboard') {
         loadDashboard();
     } else if (pageName !== 'attendance') {
@@ -60,6 +62,10 @@ function setupEventListeners() {
         if (button) closeSession(button.dataset.closeSession);
     });
     document.getElementById('reportDate').addEventListener('change', loadSessions);
+    document.getElementById('staffLoginForm').addEventListener('submit', staffLogin);
+    document.getElementById('logoutBtn').addEventListener('click', staffLogout);
+    document.getElementById('createTeacherForm').addEventListener('submit', createTeacher);
+    document.getElementById('refreshStaffBtn').addEventListener('click', loadStaffUsers);
 }
 
 function setReportDate() {
@@ -82,6 +88,9 @@ function escapeHtml(value) {
 
 async function apiJson(url, options) {
     const res = await fetch(url, options);
+    if (res.status === 401 && url !== '/api/auth/login') {
+        showStaffLogin();
+    }
     let data = null;
     try {
         data = await res.json();
@@ -89,6 +98,85 @@ async function apiJson(url, options) {
         data = { success: false, message: 'Invalid server response' };
     }
     return { res, data };
+}
+
+function showStaffLogin() {
+    stopCamera();
+    document.getElementById('appShell').hidden = true;
+    document.getElementById('staffLoginPage').hidden = false;
+    document.getElementById('staffIdentity').textContent = '';
+    document.getElementById('staffUsersBody').innerHTML = '';
+    document.getElementById('studentsBody').innerHTML = '';
+    document.getElementById('summaryBody').innerHTML = '';
+    document.getElementById('reportBody').innerHTML = '';
+    document.getElementById('registrationForm').reset();
+    document.getElementById('photoPreview').hidden = true;
+    document.getElementById('imageUpload').value = '';
+    document.getElementById('resultContent').innerHTML = '<p class="result-idle">Results appear here after a scan.</p>';
+    currentReportData = [];
+}
+
+async function initializeStaffSession() {
+    try {
+        const { res, data } = await apiJson('/api/auth/me');
+        if (!res.ok) {
+            showStaffLogin();
+            return;
+        }
+        showStaffApp(data.user);
+    } catch (err) {
+        showStaffLogin();
+        showNotification('Could not verify staff session: ' + err.message, 'error');
+    }
+}
+
+function showStaffApp(user) {
+    document.getElementById('staffLoginPage').hidden = true;
+    document.getElementById('appShell').hidden = false;
+    document.getElementById('staffIdentity').textContent = `${user.username} · ${user.role}`;
+    document.querySelectorAll('[data-admin-only]').forEach((element) => {
+        element.hidden = user.role !== 'admin';
+    });
+    showPage('dashboard', document.querySelector('[data-page="dashboard"]'));
+    if (user.role === 'admin') loadStaffUsers();
+}
+
+async function staffLogin(event) {
+    event.preventDefault();
+    const button = document.getElementById('loginSubmitBtn');
+    const username = document.getElementById('loginUsername').value.trim();
+    const password = document.getElementById('loginPassword').value;
+    button.disabled = true;
+    try {
+        const { res, data } = await apiJson('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+        });
+        if (!res.ok || !data.success) {
+            showNotification(data.message || 'Sign-in failed', 'error');
+            return;
+        }
+        document.getElementById('staffLoginForm').reset();
+        showStaffApp(data.user);
+    } catch (err) {
+        showNotification('Sign-in failed: ' + err.message, 'error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function staffLogout() {
+    try {
+        const { res } = await apiJson('/api/auth/logout', { method: 'POST' });
+        if (!res.ok) {
+            showNotification('Could not sign out', 'error');
+            return;
+        }
+        showStaffLogin();
+    } catch (err) {
+        showNotification('Could not sign out: ' + err.message, 'error');
+    }
 }
 
 async function loadDashboard() {
@@ -370,6 +458,61 @@ async function loadClasses(force = false) {
         classesLoaded = true;
     } catch (err) {
         console.error(err);
+    }
+}
+
+async function loadStaffUsers() {
+    try {
+        const { res, data } = await apiJson('/api/admin/users');
+        if (!res.ok) {
+            showNotification(data.message || 'Could not load staff accounts', 'error');
+            return;
+        }
+        const tbody = document.getElementById('staffUsersBody');
+        tbody.innerHTML = '';
+        if (!Array.isArray(data) || !data.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="empty">No staff accounts found</td></tr>';
+            return;
+        }
+        data.forEach((user) => {
+            const row = document.createElement('tr');
+            const created = user.created_at ? new Date(user.created_at).toLocaleDateString() : '—';
+            row.innerHTML = `
+                <td>${escapeHtml(user.username)}</td>
+                <td>${escapeHtml(user.role)}</td>
+                <td>${user.active ? 'Active' : 'Disabled'}</td>
+                <td>${escapeHtml(created)}</td>
+            `;
+            tbody.appendChild(row);
+        });
+    } catch (err) {
+        showNotification('Could not load staff accounts: ' + err.message, 'error');
+    }
+}
+
+async function createTeacher(event) {
+    event.preventDefault();
+    const button = document.getElementById('createTeacherBtn');
+    const username = document.getElementById('teacherUsername').value.trim();
+    const password = document.getElementById('teacherPassword').value;
+    button.disabled = true;
+    try {
+        const { res, data } = await apiJson('/api/admin/users', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+        });
+        if (!res.ok || !data.success) {
+            showNotification(data.message || 'Could not create teacher', 'error');
+            return;
+        }
+        document.getElementById('createTeacherForm').reset();
+        showNotification(`Teacher account ${data.user.username} created`, 'success');
+        await loadStaffUsers();
+    } catch (err) {
+        showNotification('Could not create teacher: ' + err.message, 'error');
+    } finally {
+        button.disabled = false;
     }
 }
 

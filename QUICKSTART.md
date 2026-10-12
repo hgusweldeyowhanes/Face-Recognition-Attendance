@@ -28,6 +28,12 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Create the first administrator (from the project folder):
+
+```bash
+flask --app app create-admin
+```
+
 > **Troubleshooting:** If pip install fails, try upgrading pip first:
 > ```bash
 > pip install --upgrade pip
@@ -45,6 +51,7 @@ You should see:
 ```
 
 Open your browser and go to: **http://localhost:5000**
+Sign in with the administrator account you created. Administrators can create teacher accounts from the **Staff** tab.
 
 ## Step 3: Register Students (2 minutes)
 

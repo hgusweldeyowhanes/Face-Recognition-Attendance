@@ -8,6 +8,7 @@ from io import BytesIO
 from unittest.mock import patch
 
 import numpy as np
+from werkzeug.security import check_password_hash, generate_password_hash
 
 os.environ["DATABASE_PATH"] = os.path.join(
     tempfile.gettempdir(), f"presence-session-tests-{os.getpid()}.sqlite3"
@@ -22,6 +23,20 @@ class ClassSessionTests(unittest.TestCase):
         attendance_app.DATABASE = os.path.join(self.temp_dir.name, "attendance.db")
         attendance_app.init_db()
         self.client = attendance_app.app.test_client()
+        conn = attendance_app.get_db()
+        conn.execute(
+            'INSERT INTO staff_users (username, password_hash, role) VALUES (?, ?, ?)',
+            ('admin', generate_password_hash('AdminPassword123!'), 'admin'),
+        )
+        conn.commit()
+        conn.close()
+        self.assertEqual(
+            self.client.post(
+                '/api/auth/login',
+                json={'username': 'admin', 'password': 'AdminPassword123!'},
+            ).status_code,
+            200,
+        )
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -40,6 +55,72 @@ class ClassSessionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Class sessions", response.data)
         self.assertIn(b"startSessionForm", response.data)
+
+    def test_staff_login_is_required_and_admin_can_create_teacher(self):
+        anonymous = attendance_app.app.test_client()
+        self.assertEqual(anonymous.get('/api/students').status_code, 401)
+        self.assertEqual(anonymous.get('/health').status_code, 200)
+        self.assertEqual(
+            anonymous.post(
+                '/api/auth/login',
+                json={'username': 'admin', 'password': 'wrong-password'},
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get(
+                '/api/auth/me',
+                headers={'Origin': 'https://untrusted.example'},
+            ).status_code,
+            403,
+        )
+
+        response = self.client.post(
+            '/api/admin/users',
+            json={'username': 'teacher.one', 'password': 'TeacherPassword123!'},
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['user']['role'], 'teacher')
+
+        conn = attendance_app.get_db()
+        stored_hash = conn.execute(
+            'SELECT password_hash FROM staff_users WHERE username = ?',
+            ('teacher.one',),
+        ).fetchone()['password_hash']
+        conn.close()
+        self.assertTrue(check_password_hash(stored_hash, 'TeacherPassword123!'))
+        self.assertNotEqual(stored_hash, 'TeacherPassword123!')
+
+        teacher = attendance_app.app.test_client()
+        login = teacher.post(
+            '/api/auth/login',
+            json={'username': 'teacher.one', 'password': 'TeacherPassword123!'},
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(
+            teacher.post(
+                '/api/admin/users',
+                json={'username': 'teacher.two', 'password': 'TeacherPassword456!'},
+            ).status_code,
+            403,
+        )
+        self.assertEqual(teacher.get('/api/students').status_code, 403)
+
+    def test_admin_cli_can_create_initial_administrator(self):
+        runner = attendance_app.app.test_cli_runner()
+        result = runner.invoke(
+            args=['create-admin'],
+            input='second-admin\nSecondAdminPassword123!\nSecondAdminPassword123!\n',
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        conn = attendance_app.get_db()
+        user = conn.execute(
+            'SELECT role, password_hash FROM staff_users WHERE username = ?',
+            ('second-admin',),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(user['role'], 'admin')
+        self.assertTrue(check_password_hash(user['password_hash'], 'SecondAdminPassword123!'))
 
     def test_start_session_validates_class_and_prevents_two_active_sessions(self):
         self.add_student("STU-1")

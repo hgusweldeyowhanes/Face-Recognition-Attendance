@@ -9,6 +9,8 @@ Face recognition attendance for classrooms. Flask API + modern web UI. Students 
 - Live overview by class
 - Manually opened class sessions with configurable late grace periods
 - Session close-out that records absences for the enrolled class
+- Staff sign-in with administrator/teacher roles
+- Administrator-created teacher accounts
 - Attendance reports + CSV export
 - Encoding cache (DB-backed) for faster recognition
 - `/health` endpoint for monitoring
@@ -28,6 +30,7 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 copy .env.example .env   # or: cp .env.example .env
+flask --app app create-admin
 python app.py
 ```
 
@@ -40,7 +43,8 @@ Open [http://127.0.0.1:5000](http://127.0.0.1:5000).
 1. Set a strong `SECRET_KEY` and `FLASK_ENV=production` in `.env`.
 2. Set `FLASK_DEBUG=False`.
 3. Restrict `CORS_ORIGINS` to your domain.
-4. Run with Waitress:
+4. Create the initial administrator with `flask --app app create-admin` before starting the server. The command prompts for a username and password.
+5. Run with Waitress:
 
 ```bash
 # Option A — through app entry (production mode)
@@ -57,6 +61,7 @@ waitress-serve --host=0.0.0.0 --port=5000 --threads=4 wsgi:app
 # Generate a secret, then:
 set SECRET_KEY=your-long-random-secret
 docker compose up --build -d
+docker compose exec presence flask --app app create-admin
 ```
 
 Health check: `GET /health`
@@ -92,6 +97,11 @@ See `.env.example` for all options. Important ones:
 |--------|------|-------------|
 | GET | `/` | Web UI |
 | GET | `/health` | Health probe |
+| POST | `/api/auth/login` | Staff sign-in |
+| GET | `/api/auth/me` | Current staff account |
+| POST | `/api/auth/logout` | Staff sign-out |
+| GET | `/api/admin/users` | List staff accounts (admin only) |
+| POST | `/api/admin/users` | Create a teacher account (admin only) |
 | GET | `/api/sessions?date=YYYY-MM-DD` | List sessions and attendance counts for a date (defaults to today) |
 | POST | `/api/sessions` | Start a class session (`class_name`, optional `grace_minutes`, default 10) |
 | POST | `/api/sessions/<id>/close` | Close a session and record absences |
@@ -111,9 +121,9 @@ Use IDs like `MI-01` — **no** `/` or `\` (those create folders on disk).
 
 Start a session for the class from the **Sessions** tab before checking students in. The default late grace period is 10 minutes and can be set from 0 to 120 minutes. Check-ins before the grace period ends are marked **Present**; later check-ins are marked **Late**. Close the session when class ends to record **Absent** for students who did not check in. A class can have one open session per date.
 
-## Important access-control note
+## Security note
 
-Teacher/admin accounts and role-based permissions have not been added yet. The management endpoints, student roster, and reports are currently unauthenticated, so run this only in a trusted local/demo environment until access control is implemented. Do not expose it publicly or use real student biometric data yet.
+Attendance, roster, reports, and session APIs require a staff sign-in. Only administrators can create teacher accounts or manage student registration. Create the first administrator through the CLI command above. Liveness detection, consent workflows, and biometric retention controls are not implemented yet; do not expose this publicly or use real student biometric data until those safeguards are in place.
 
 ## License
 
