@@ -111,6 +111,8 @@ See `.env.example` for all options. Important ones:
 | POST | `/api/students/<id>/face-data` | Replace/enroll face data (requires `face_consent=true`, admin only) |
 | DELETE | `/api/students/<id>/face-data` | Delete image, encoding, and consent record; retains attendance (admin only, requires `{"confirm": true}`) |
 | POST | `/api/recognize` | Recognize + mark present |
+| POST | `/api/attendance/correct` | Correct a student's status/times in a session (staff sign-in and reason required) |
+| GET | `/api/attendance/corrections?session_id=<id>&student_id=<id>` | View a session record's correction audit history |
 | GET | `/api/attendance/summary` | Class summary |
 | GET | `/api/attendance/report` | Daily report; add `session_id` for a session-specific report |
 | GET | `/api/classes` | Distinct classes |
@@ -123,6 +125,10 @@ Use IDs like `MI-01` — **no** `/` or `\` (those create folders on disk).
 ## Class sessions
 
 Start a session for the class from the **Sessions** tab before checking students in. The default late grace period is 10 minutes and can be set from 0 to 120 minutes. Check-ins before the grace period ends are marked **Present**; later check-ins are marked **Late**. Close the session when class ends to record **Absent** for students who did not check in. A class can have one open session per date.
+
+## Correcting attendance
+
+Open **Reports**, choose a specific session (whole-day reports are read-only), then select **Correct** on a student's row. Staff can change the status and check-in/out times. Each correction requires a reason and is retained in an audit history showing the previous/new values, staff member, and timestamp.
 
 ## Privacy and consent
 

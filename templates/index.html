@@ -349,7 +349,7 @@
                     <div>
                         <p class="eyebrow">Exports</p>
                         <h1>Attendance reports</h1>
-                        <p class="lede">Filter by date and class, then export CSV.</p>
+                        <p class="lede">Filter by date and class, then export CSV. Select a session to correct attendance and review its audit history.</p>
                     </div>
                 </header>
 
@@ -386,11 +386,13 @@
                                     <th>Class</th>
                                     <th>Date</th>
                                     <th>Time in</th>
+                                    <th>Time out</th>
                                     <th>Status</th>
+                                    <th>Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="reportBody">
-                                <tr><td colspan="6" class="empty">Select a date and generate a report</td></tr>
+                                <tr><td colspan="8" class="empty">Select a date and generate a report</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -399,6 +401,52 @@
         </section>
     </main>
     </div>
+
+    <dialog id="attendanceCorrectionDialog" class="face-dialog">
+        <form id="attendanceCorrectionForm" class="panel">
+            <p class="eyebrow">Attendance record</p>
+            <h2>Correct attendance</h2>
+            <p class="lede">Student: <strong id="correctionStudent"></strong></p>
+            <div class="field">
+                <label for="correctionStatus">Status</label>
+                <select id="correctionStatus" required>
+                    <option value="Present">Present</option>
+                    <option value="Late">Late</option>
+                    <option value="Absent">Absent</option>
+                </select>
+            </div>
+            <div id="correctionTimes">
+                <div class="field">
+                    <label for="correctionTimeIn">Time in</label>
+                    <input type="time" id="correctionTimeIn" step="1">
+                </div>
+                <div class="field">
+                    <label for="correctionTimeOut">Time out <span class="optional">optional</span></label>
+                    <input type="time" id="correctionTimeOut" step="1">
+                </div>
+            </div>
+            <div class="field">
+                <label for="correctionReason">Reason for correction</label>
+                <textarea id="correctionReason" minlength="5" maxlength="500" rows="3" required></textarea>
+            </div>
+            <div class="filter-actions">
+                <button type="button" class="btn btn-secondary" id="cancelCorrectionBtn">Cancel</button>
+                <button type="submit" class="btn btn-primary" id="saveCorrectionBtn">Save correction</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="correctionHistoryDialog" class="face-dialog">
+        <div class="panel">
+            <p class="eyebrow">Audit trail</p>
+            <h2>Correction history</h2>
+            <p class="lede" id="correctionHistoryStudent"></p>
+            <ol id="correctionHistoryList" class="correction-history-list"></ol>
+            <div class="filter-actions">
+                <button type="button" class="btn btn-secondary" id="closeCorrectionHistoryBtn">Close</button>
+            </div>
+        </div>
+    </dialog>
 
     <div id="toast-root" class="toast-root" aria-live="polite"></div>
     <script src="{{ url_for('static', filename='script.js') }}"></script>

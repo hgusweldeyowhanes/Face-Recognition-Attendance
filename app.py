@@ -170,6 +170,29 @@ def init_db():
         sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (student_id) REFERENCES students(student_id)
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS attendance_corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        attendance_id INTEGER NOT NULL,
+        session_id INTEGER NOT NULL,
+        student_id TEXT NOT NULL,
+        previous_status TEXT NOT NULL,
+        new_status TEXT NOT NULL,
+        previous_time_in TEXT,
+        new_time_in TEXT,
+        previous_time_out TEXT,
+        new_time_out TEXT,
+        reason TEXT NOT NULL,
+        staff_user_id INTEGER,
+        staff_username TEXT NOT NULL,
+        corrected_at TEXT NOT NULL,
+        FOREIGN KEY (attendance_id) REFERENCES attendance(id),
+        FOREIGN KEY (session_id) REFERENCES class_sessions(id),
+        FOREIGN KEY (student_id) REFERENCES students(student_id)
+    )''')
+    c.execute(
+        '''CREATE INDEX IF NOT EXISTS idx_attendance_corrections_record
+           ON attendance_corrections(session_id, student_id, id)'''
+    )
     c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_session ON attendance(session_id)')
     c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_legacy_attendance_day
@@ -462,6 +485,16 @@ def validate_date(value):
         return True
     except ValueError:
         return False
+
+
+def normalize_clock_time(value):
+    if value in (None, ''):
+        return None
+    if not isinstance(value, str) or not re.fullmatch(
+        r'(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?', value
+    ):
+        return False
+    return value if len(value) == 8 else f'{value}:00'
 
 
 def session_rows(date):
@@ -1135,19 +1168,20 @@ def get_attendance_report():
             conn.close()
             return api_error('Session does not belong to the selected date')
         conditions = ['s.class_name = ?']
-        params = [session['date'], session_id, session['class_name']]
+        condition_params = [session['class_name']]
         if class_name:
             conditions.append('s.class_name = ?')
-            params.append(class_name)
+            condition_params.append(class_name)
         rows = conn.execute(
             f'''SELECT s.student_id, s.name, s.class_name AS class, ? AS date,
-                       a.time_in, COALESCE(a.status, 'Absent') AS status
+                       a.id AS attendance_id, a.time_in, a.time_out,
+                       COALESCE(a.status, 'Absent') AS status, ? AS session_id
                 FROM students s
                 LEFT JOIN attendance a
                   ON a.student_id = s.student_id AND a.session_id = ?
                 WHERE {' AND '.join(conditions)}
                 ORDER BY s.name''',
-            params,
+            [session['date'], session_id, session_id, *condition_params],
         ).fetchall()
     else:
         attendance_filter = 'WHERE date = ?' if date else ''
@@ -1159,11 +1193,12 @@ def get_attendance_report():
             params.append(class_name)
         rows = conn.execute(
             f'''SELECT s.student_id, s.name, s.class_name AS class,
-                       COALESCE(a.date, ?) AS date, a.time_in,
+                       COALESCE(a.date, ?) AS date, a.time_in, a.time_out,
                        COALESCE(a.status, 'Absent') AS status
                 FROM students s
                 LEFT JOIN (
                     SELECT student_id, date, MIN(time_in) AS time_in,
+                           MAX(time_out) AS time_out,
                            CASE MAX(CASE status WHEN 'Late' THEN 2
                                                 WHEN 'Present' THEN 1 ELSE 0 END)
                                WHEN 2 THEN 'Late' WHEN 1 THEN 'Present' ELSE 'Absent' END AS status
@@ -1177,6 +1212,162 @@ def get_attendance_report():
         ).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/attendance/correct', methods=['POST'])
+@require_role('admin', 'teacher')
+def correct_attendance_api():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return api_error('Request body must be a JSON object')
+
+    raw_session_id = payload.get('session_id')
+    if isinstance(raw_session_id, bool) or not str(raw_session_id or '').isdigit():
+        return api_error('A valid session_id is required')
+    session_id = int(raw_session_id)
+    if session_id < 1:
+        return api_error('A valid session_id is required')
+    raw_student_id = payload.get('student_id')
+    if not isinstance(raw_student_id, str):
+        return api_error('A valid student_id is required')
+    student_id = sanitize_id(raw_student_id)
+    status = payload.get('status')
+    reason = payload.get('reason')
+    if not student_id:
+        return api_error('A valid student_id is required')
+    if status not in ('Present', 'Late', 'Absent'):
+        return api_error('Status must be Present, Late, or Absent')
+    if not isinstance(reason, str) or not 5 <= len(reason.strip()) <= 500:
+        return api_error('Correction reason must be between 5 and 500 characters')
+    reason = reason.strip()
+
+    if status == 'Absent':
+        time_in = None
+        time_out = None
+    else:
+        time_in = normalize_clock_time(payload.get('time_in'))
+        time_out = normalize_clock_time(payload.get('time_out'))
+        if time_in is False:
+            return api_error('Time in must use HH:MM or HH:MM:SS format')
+        if not time_in:
+            return api_error('Time in is required for Present or Late')
+        if time_out is False:
+            return api_error('Time out must use HH:MM or HH:MM:SS format')
+        if time_out and time_out < time_in:
+            return api_error('Time out cannot be earlier than time in')
+
+    conn = get_db()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        session = conn.execute(
+            'SELECT id, class_name, date FROM class_sessions WHERE id = ?',
+            (session_id,),
+        ).fetchone()
+        student = conn.execute(
+            'SELECT student_id FROM students WHERE student_id = ? AND class_name = ?',
+            (student_id, session['class_name'] if session else ''),
+        ).fetchone()
+        if not session or not student:
+            conn.rollback()
+            return api_error('Student or session not found for this class', 404)
+
+        previous = conn.execute(
+            '''SELECT id, status, time_in, time_out FROM attendance
+               WHERE student_id = ? AND session_id = ?''',
+            (student_id, session_id),
+        ).fetchone()
+        previous_status = previous['status'] if previous else 'Absent'
+        previous_time_in = previous['time_in'] if previous else None
+        previous_time_out = previous['time_out'] if previous else None
+
+        conn.execute(
+            '''INSERT INTO attendance (student_id, date, time_in, time_out, status, session_id)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(student_id, session_id) DO UPDATE SET
+                   time_in = excluded.time_in,
+                   time_out = excluded.time_out,
+                   status = excluded.status''',
+            (student_id, session['date'], time_in, time_out, status, session_id),
+        )
+        attendance = conn.execute(
+            'SELECT id FROM attendance WHERE student_id = ? AND session_id = ?',
+            (student_id, session_id),
+        ).fetchone()
+        conn.execute(
+            '''INSERT INTO attendance_corrections (
+                   attendance_id, session_id, student_id, previous_status, new_status,
+                   previous_time_in, new_time_in, previous_time_out, new_time_out,
+                   reason, staff_user_id, staff_username, corrected_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                attendance['id'],
+                session_id,
+                student_id,
+                previous_status,
+                status,
+                previous_time_in,
+                time_in,
+                previous_time_out,
+                time_out,
+                reason,
+                g.staff_user['id'],
+                g.staff_user['username'],
+                datetime.now().astimezone().isoformat(timespec='seconds'),
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            'Failed to correct attendance for student %s in session %s',
+            student_id,
+            session_id,
+        )
+        return api_error('Could not correct attendance', 500)
+    finally:
+        conn.close()
+
+    return jsonify({'success': True, 'message': 'Attendance corrected and recorded in the audit history'})
+
+
+@app.route('/api/attendance/corrections', methods=['GET'])
+@require_role('admin', 'teacher')
+def get_attendance_corrections():
+    raw_session_id = request.args.get('session_id', '')
+    if not raw_session_id.isdigit():
+        return api_error('A valid session_id is required')
+    session_id = int(raw_session_id)
+    if session_id < 1:
+        return api_error('A valid session_id is required')
+    student_id = sanitize_id(request.args.get('student_id'))
+    if not student_id:
+        return api_error('A valid student_id is required')
+
+    conn = get_db()
+    session = conn.execute(
+        'SELECT class_name FROM class_sessions WHERE id = ?',
+        (session_id,),
+    ).fetchone()
+    if not session:
+        conn.close()
+        return api_error('Session not found', 404)
+    student = conn.execute(
+        'SELECT student_id FROM students WHERE student_id = ? AND class_name = ?',
+        (student_id, session['class_name']),
+    ).fetchone()
+    if not student:
+        conn.close()
+        return api_error('Student not found for this class', 404)
+    rows = conn.execute(
+        '''SELECT previous_status, new_status, previous_time_in, new_time_in,
+                  previous_time_out, new_time_out, reason, staff_username, corrected_at
+           FROM attendance_corrections
+           WHERE student_id = ? AND session_id = ?
+           ORDER BY id DESC''',
+        (student_id, session_id),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(row) for row in rows])
 
 
 @app.route('/api/attendance/summary', methods=['GET'])

@@ -289,6 +289,84 @@ class ClassSessionTests(unittest.TestCase):
         duplicate_close = self.client.post(f"/api/sessions/{session_id}/close")
         self.assertEqual(duplicate_close.status_code, 409)
 
+    def test_attendance_corrections_update_record_and_keep_audit_history(self):
+        self.add_student('STU-1')
+        started = self.client.post('/api/sessions', json={'class_name': '10-A'})
+        session_id = started.json['session']['id']
+        self.client.post(f'/api/sessions/{session_id}/close')
+
+        missing_reason = self.client.post(
+            '/api/attendance/correct',
+            json={
+                'session_id': session_id,
+                'student_id': 'STU-1',
+                'status': 'Present',
+                'time_in': '08:55',
+                'reason': ' ',
+            },
+        )
+        self.assertEqual(missing_reason.status_code, 400)
+
+        first_correction = self.client.post(
+            '/api/attendance/correct',
+            json={
+                'session_id': session_id,
+                'student_id': 'STU-1',
+                'status': 'Present',
+                'time_in': '08:55',
+                'time_out': '15:00',
+                'reason': 'Teacher verified sign-in sheet',
+            },
+        )
+        self.assertEqual(first_correction.status_code, 200)
+        second_correction = self.client.post(
+            '/api/attendance/correct',
+            json={
+                'session_id': session_id,
+                'student_id': 'STU-1',
+                'status': 'Late',
+                'time_in': '09:05:00',
+                'time_out': None,
+                'reason': 'Arrival time was entered incorrectly',
+            },
+        )
+        self.assertEqual(second_correction.status_code, 200)
+
+        report = self.client.get(f'/api/attendance/report?session_id={session_id}')
+        self.assertEqual(report.status_code, 200)
+        report_row = report.json[0]
+        self.assertEqual(report_row['status'], 'Late')
+        self.assertEqual(report_row['time_in'], '09:05:00')
+        self.assertEqual(report_row['session_id'], session_id)
+        self.assertIsNotNone(report_row['attendance_id'])
+
+        history = self.client.get(
+            f'/api/attendance/corrections?session_id={session_id}&student_id=STU-1'
+        )
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(len(history.json), 2)
+        self.assertEqual(
+            [(item['previous_status'], item['new_status']) for item in history.json],
+            [('Present', 'Late'), ('Absent', 'Present')],
+        )
+        self.assertEqual(history.json[0]['staff_username'], 'admin')
+
+    def test_attendance_correction_cannot_target_a_different_class(self):
+        self.add_student('STU-1', class_name='10-A')
+        started = self.client.post('/api/sessions', json={'class_name': '10-A'})
+        self.add_student('STU-2', class_name='11-B')
+
+        response = self.client.post(
+            '/api/attendance/correct',
+            json={
+                'session_id': started.json['session']['id'],
+                'student_id': 'STU-2',
+                'status': 'Absent',
+                'reason': 'Wrong student was marked present',
+            },
+        )
+        self.assertEqual(response.status_code, 404)
+
     def test_recognition_marks_late_arrival_for_active_session(self):
         self.add_student("STU-1")
         started = self.client.post(
@@ -434,6 +512,10 @@ class ClassSessionTests(unittest.TestCase):
 
         conn = attendance_app.get_db()
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(attendance)")}
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
         record = conn.execute("SELECT * FROM attendance").fetchone()
         migrated_student = conn.execute(
             'SELECT face_consent_at, face_consent_version FROM students WHERE student_id = ?',
@@ -446,6 +528,7 @@ class ClassSessionTests(unittest.TestCase):
         self.assertIsNone(record["session_id"])
         self.assertIsNone(migrated_student['face_consent_at'])
         self.assertIsNone(migrated_student['face_consent_version'])
+        self.assertIn('attendance_corrections', tables)
         with tempfile.TemporaryDirectory() as faces_dir:
             with patch.object(attendance_app, 'FACES_DIR', faces_dir):
                 attendance_app.invalidate_face_cache()

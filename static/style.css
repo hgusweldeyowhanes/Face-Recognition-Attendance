@@ -596,8 +596,10 @@ input[type="email"],
 input[type="password"],
 input[type="date"],
 input[type="number"],
+input[type="time"],
 input[type="file"],
-select {
+select,
+textarea {
     width: 100%;
     font: inherit;
     padding: 0.7rem 0.8rem;
@@ -608,7 +610,8 @@ select {
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
     outline: 2px solid rgba(15, 118, 110, 0.35);
     outline-offset: 1px;
     border-color: var(--teal);
@@ -658,6 +661,37 @@ select:focus {
     display: flex;
     gap: 0.5rem;
     flex-wrap: wrap;
+}
+
+#correctionTimes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+}
+
+.report-actions {
+    min-width: 170px;
+}
+
+.correction-history-list {
+    display: grid;
+    gap: 0.75rem;
+    padding-left: 1.4rem;
+}
+
+.correction-history-list li {
+    padding: 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: white;
+}
+
+.correction-history-list p {
+    margin: 0.4rem 0;
+}
+
+.correction-history-list small {
+    color: var(--ink-soft);
 }
 
 /* Toasts */

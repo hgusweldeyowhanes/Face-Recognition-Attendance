@@ -1,5 +1,6 @@
 let cameraStream = null;
 let currentReportData = [];
+let currentReportSessionId = '';
 let classesLoaded = false;
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -67,6 +68,26 @@ function setupEventListeners() {
     });
     document.getElementById('generateReportBtn').addEventListener('click', generateReport);
     document.getElementById('exportReportBtn').addEventListener('click', exportReport);
+    document.getElementById('reportBody').addEventListener('click', (event) => {
+        const correctButton = event.target.closest('[data-correct-attendance]');
+        const historyButton = event.target.closest('[data-correction-history]');
+        const button = correctButton || historyButton;
+        if (!button) return;
+        const record = currentReportData.find(
+            (item) => item.student_id === button.dataset.studentId,
+        );
+        if (!record) return;
+        if (correctButton) openAttendanceCorrection(record);
+        else loadCorrectionHistory(record);
+    });
+    document.getElementById('attendanceCorrectionForm').addEventListener('submit', saveAttendanceCorrection);
+    document.getElementById('correctionStatus').addEventListener('change', updateCorrectionTimeFields);
+    document.getElementById('cancelCorrectionBtn').addEventListener('click', () => {
+        document.getElementById('attendanceCorrectionDialog').close();
+    });
+    document.getElementById('closeCorrectionHistoryBtn').addEventListener('click', () => {
+        document.getElementById('correctionHistoryDialog').close();
+    });
     document.getElementById('refreshDashboardBtn').addEventListener('click', loadDashboard);
     document.getElementById('startSessionForm').addEventListener('submit', startSession);
     document.getElementById('refreshSessionsBtn').addEventListener('click', loadSessions);
@@ -128,9 +149,19 @@ function showStaffLogin() {
     document.getElementById('faceEnrollmentForm').reset();
     const faceEnrollmentDialog = document.getElementById('faceEnrollmentDialog');
     if (faceEnrollmentDialog.open) faceEnrollmentDialog.close();
+    document.getElementById('attendanceCorrectionForm').reset();
+    const attendanceCorrectionDialog = document.getElementById('attendanceCorrectionDialog');
+    if (attendanceCorrectionDialog.open) attendanceCorrectionDialog.close();
+    delete attendanceCorrectionDialog.dataset.studentId;
+    delete attendanceCorrectionDialog.dataset.sessionId;
+    const correctionHistoryDialog = document.getElementById('correctionHistoryDialog');
+    if (correctionHistoryDialog.open) correctionHistoryDialog.close();
+    document.getElementById('correctionHistoryList').innerHTML = '';
+    document.getElementById('correctionHistoryStudent').textContent = '';
     document.getElementById('imageUpload').value = '';
     document.getElementById('resultContent').innerHTML = '<p class="result-idle">Results appear here after a scan.</p>';
     currentReportData = [];
+    currentReportSessionId = '';
 }
 
 async function initializeStaffSession() {
@@ -704,7 +735,7 @@ async function closeSession(sessionId) {
     }
 }
 
-async function generateReport() {
+async function generateReport(showReadyNotification = true) {
     const date = document.getElementById('reportDate').value;
     const classFilter = document.getElementById('reportClass').value;
     const sessionFilter = document.getElementById('reportSession').value;
@@ -718,10 +749,15 @@ async function generateReport() {
     if (sessionFilter) url += `&session_id=${encodeURIComponent(sessionFilter)}`;
 
     try {
-        const { data } = await apiJson(url);
+        const { res, data } = await apiJson(url);
+        if (!res.ok || !Array.isArray(data)) {
+            showNotification(data.message || 'Could not generate report', 'error');
+            return;
+        }
         currentReportData = Array.isArray(data) ? data : [];
+        currentReportSessionId = sessionFilter;
         displayReport(currentReportData);
-        showNotification('Report ready', 'success');
+        if (showReadyNotification) showNotification('Report ready', 'success');
     } catch (err) {
         showNotification('Error generating report: ' + err.message, 'error');
     }
@@ -732,7 +768,7 @@ function displayReport(data) {
     tbody.innerHTML = '';
 
     if (!data.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty">No records found</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="empty">No records found</td></tr>';
         return;
     }
 
@@ -746,10 +782,127 @@ function displayReport(data) {
             <td>${escapeHtml(record.class)}</td>
             <td>${escapeHtml(record.date || '—')}</td>
             <td>${escapeHtml(record.time_in || '—')}</td>
+            <td>${escapeHtml(record.time_out || '—')}</td>
             <td><span class="status-pill ${pillClass}">${escapeHtml(status)}</span></td>
+            <td class="report-actions">
+                ${currentReportSessionId ? `
+                    <button type="button" class="btn btn-secondary btn-small"
+                            data-correct-attendance data-student-id="${escapeHtml(record.student_id)}">Correct</button>
+                    <button type="button" class="btn btn-ghost btn-small"
+                            data-correction-history data-student-id="${escapeHtml(record.student_id)}">History</button>
+                ` : '<span class="optional">Choose a session</span>'}
+            </td>
         `;
         tbody.appendChild(row);
     });
+}
+
+function openAttendanceCorrection(record) {
+    const dialog = document.getElementById('attendanceCorrectionDialog');
+    const form = document.getElementById('attendanceCorrectionForm');
+    form.reset();
+    dialog.dataset.studentId = record.student_id;
+    dialog.dataset.sessionId = currentReportSessionId;
+    document.getElementById('correctionStudent').textContent =
+        `${record.name} (${record.student_id}) · ${record.date}`;
+    document.getElementById('correctionStatus').value = record.status || 'Absent';
+    document.getElementById('correctionTimeIn').value = record.time_in || '';
+    document.getElementById('correctionTimeOut').value = record.time_out || '';
+    updateCorrectionTimeFields();
+    dialog.showModal();
+}
+
+function updateCorrectionTimeFields() {
+    const absent = document.getElementById('correctionStatus').value === 'Absent';
+    const times = document.getElementById('correctionTimes');
+    const timeIn = document.getElementById('correctionTimeIn');
+    const timeOut = document.getElementById('correctionTimeOut');
+    times.hidden = absent;
+    timeIn.required = !absent;
+    timeIn.disabled = absent;
+    timeOut.disabled = absent;
+}
+
+async function saveAttendanceCorrection(event) {
+    event.preventDefault();
+    const dialog = document.getElementById('attendanceCorrectionDialog');
+    const button = document.getElementById('saveCorrectionBtn');
+    const status = document.getElementById('correctionStatus').value;
+    const payload = {
+        session_id: dialog.dataset.sessionId,
+        student_id: dialog.dataset.studentId,
+        status,
+        reason: document.getElementById('correctionReason').value.trim(),
+        time_in: status === 'Absent' ? null : document.getElementById('correctionTimeIn').value,
+        time_out: status === 'Absent' ? null : document.getElementById('correctionTimeOut').value,
+    };
+
+    button.disabled = true;
+    try {
+        const { res, data } = await apiJson('/api/attendance/correct', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok || !data.success) {
+            showNotification(data.message || 'Could not correct attendance', 'error');
+            return;
+        }
+        dialog.close();
+        showNotification(data.message, 'success');
+        await generateReport(false);
+        await loadDashboard();
+    } catch (err) {
+        showNotification('Could not correct attendance: ' + err.message, 'error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function loadCorrectionHistory(record) {
+    const dialog = document.getElementById('correctionHistoryDialog');
+    const list = document.getElementById('correctionHistoryList');
+    document.getElementById('correctionHistoryStudent').textContent =
+        `${record.name} (${record.student_id}) · ${record.date}`;
+    list.innerHTML = '<li class="empty">Loading correction history…</li>';
+    dialog.showModal();
+    try {
+        const query = new URLSearchParams({
+            session_id: currentReportSessionId,
+            student_id: record.student_id,
+        });
+        const { res, data } = await apiJson(`/api/attendance/corrections?${query}`);
+        if (!res.ok || !Array.isArray(data)) {
+            list.innerHTML = `<li class="empty">${escapeHtml(data.message || 'Could not load correction history')}</li>`;
+            return;
+        }
+        if (!data.length) {
+            list.innerHTML = '<li class="empty">No corrections recorded for this session.</li>';
+            return;
+        }
+        list.innerHTML = data.map((item) => {
+            const time = item.corrected_at
+                ? new Date(item.corrected_at).toLocaleString()
+                : 'Unknown time';
+            const timeChanges = [];
+            if (item.previous_time_in !== item.new_time_in) {
+                timeChanges.push(`Time in: ${item.previous_time_in || '—'} → ${item.new_time_in || '—'}`);
+            }
+            if (item.previous_time_out !== item.new_time_out) {
+                timeChanges.push(`Time out: ${item.previous_time_out || '—'} → ${item.new_time_out || '—'}`);
+            }
+            return `
+                <li>
+                    <strong>${escapeHtml(item.previous_status)} → ${escapeHtml(item.new_status)}</strong>
+                    ${timeChanges.length ? `<p>${timeChanges.map(escapeHtml).join('<br>')}</p>` : ''}
+                    <p>${escapeHtml(item.reason)}</p>
+                    <small>${escapeHtml(item.staff_username)} · ${escapeHtml(time)}</small>
+                </li>
+            `;
+        }).join('');
+    } catch (err) {
+        list.innerHTML = `<li class="empty">${escapeHtml(err.message || 'Could not load correction history')}</li>`;
+    }
 }
 
 function exportReport() {
@@ -758,9 +911,9 @@ function exportReport() {
         return;
     }
 
-    let csv = 'Student ID,Name,Class,Date,Time In,Status\n';
+    let csv = 'Student ID,Name,Class,Date,Time In,Time Out,Status\n';
     currentReportData.forEach((record) => {
-        csv += `${record.student_id},"${String(record.name || '').replace(/"/g, '""')}",${record.class},"${record.date || ''}","${record.time_in || ''}",${record.status || 'Absent'}\n`;
+        csv += `${record.student_id},"${String(record.name || '').replace(/"/g, '""')}",${record.class},"${record.date || ''}","${record.time_in || ''}","${record.time_out || ''}",${record.status || 'Absent'}\n`;
     });
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
