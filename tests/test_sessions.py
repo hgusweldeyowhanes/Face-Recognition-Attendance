@@ -44,8 +44,15 @@ class ClassSessionTests(unittest.TestCase):
     def add_student(self, student_id, class_name="10-A"):
         conn = attendance_app.get_db()
         conn.execute(
-            "INSERT INTO students (student_id, name, class_name) VALUES (?, ?, ?)",
-            (student_id, student_id, class_name),
+            '''INSERT INTO students (student_id, name, class_name, face_consent_at, face_consent_version)
+               VALUES (?, ?, ?, ?, ?)''',
+            (
+                student_id,
+                student_id,
+                class_name,
+                datetime.now().astimezone().isoformat(timespec='seconds'),
+                attendance_app.FACE_CONSENT_VERSION,
+            ),
         )
         conn.commit()
         conn.close()
@@ -121,6 +128,120 @@ class ClassSessionTests(unittest.TestCase):
         conn.close()
         self.assertEqual(user['role'], 'admin')
         self.assertTrue(check_password_hash(user['password_hash'], 'SecondAdminPassword123!'))
+
+    def test_student_registration_requires_explicit_face_consent(self):
+        response = self.client.post(
+            '/api/students/add',
+            data={
+                'student_id': 'STU-1',
+                'name': 'Student',
+                'class_name': '10-A',
+                'image': (BytesIO(b'fake image'), 'face.jpg'),
+            },
+            content_type='multipart/form-data',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('consent', response.json['message'].lower())
+        conn = attendance_app.get_db()
+        count = conn.execute('SELECT COUNT(*) AS count FROM students').fetchone()['count']
+        conn.close()
+        self.assertEqual(count, 0)
+
+    def test_re_enrollment_records_new_consent_for_legacy_student(self):
+        self.add_student('STU-1')
+        conn = attendance_app.get_db()
+        conn.execute(
+            'UPDATE students SET face_encoding = NULL, face_consent_at = NULL, face_consent_version = NULL WHERE student_id = ?',
+            ('STU-1',),
+        )
+        conn.commit()
+        conn.close()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            faces_dir = os.path.join(temp_dir, 'faces')
+            uploads_dir = os.path.join(temp_dir, 'uploads')
+            os.makedirs(uploads_dir)
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(attendance_app, 'FACES_DIR', faces_dir))
+                stack.enter_context(patch.object(attendance_app, 'UPLOAD_DIR', uploads_dir))
+                stack.enter_context(patch.object(attendance_app, 'encode_face', return_value=np.ones(128)))
+                stack.enter_context(
+                    patch.object(
+                        attendance_app.face_recognition,
+                        'load_image_file',
+                        return_value=np.zeros((2, 2, 3), dtype=np.uint8),
+                    )
+                )
+                stack.enter_context(patch.object(attendance_app.cv2, 'imwrite', return_value=True))
+                response = self.client.post(
+                    '/api/students/STU-1/face-data',
+                    data={
+                        'face_consent': 'true',
+                        'image': (BytesIO(b'fake image'), 'replacement.jpg'),
+                    },
+                    content_type='multipart/form-data',
+                )
+            self.assertEqual(response.status_code, 200)
+
+        conn = attendance_app.get_db()
+        student = conn.execute(
+            'SELECT face_encoding, face_consent_at, face_consent_version FROM students WHERE student_id = ?',
+            ('STU-1',),
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(student['face_encoding'])
+        self.assertIsNotNone(student['face_consent_at'])
+        self.assertEqual(student['face_consent_version'], attendance_app.FACE_CONSENT_VERSION)
+
+    def test_delete_face_data_keeps_attendance_and_excludes_face_from_recognition(self):
+        self.add_student('STU-1')
+        conn = attendance_app.get_db()
+        conn.execute(
+            'UPDATE students SET face_encoding = ? WHERE student_id = ?',
+            (np.ones(128).tobytes(), 'STU-1'),
+        )
+        conn.execute(
+            '''INSERT INTO attendance (student_id, date, time_in, status)
+               VALUES (?, ?, ?, ?)''',
+            ('STU-1', datetime.now().strftime('%Y-%m-%d'), '09:00:00', 'Present'),
+        )
+        conn.commit()
+        conn.close()
+
+        with tempfile.TemporaryDirectory() as faces_dir:
+            student_dir = os.path.join(faces_dir, 'STU-1')
+            os.makedirs(student_dir)
+            with open(os.path.join(student_dir, 'STU-1.jpg'), 'wb') as image:
+                image.write(b'private face image')
+            with patch.object(attendance_app, 'FACES_DIR', faces_dir):
+                attendance_app.invalidate_face_cache()
+                self.assertEqual(len(attendance_app.load_known_faces()[0]), 1)
+                roster = self.client.get('/api/students')
+                self.assertEqual(roster.status_code, 200)
+                self.assertTrue(roster.json[0]['face_data_present'])
+                self.assertNotIn('face_encoding', roster.json[0])
+                response = self.client.delete(
+                    '/api/students/STU-1/face-data',
+                    json={'confirm': True},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(os.path.exists(student_dir))
+                self.assertEqual(attendance_app.load_known_faces(), ([], []))
+
+        conn = attendance_app.get_db()
+        student = conn.execute(
+            'SELECT face_encoding, face_consent_at, face_consent_version FROM students WHERE student_id = ?',
+            ('STU-1',),
+        ).fetchone()
+        history = conn.execute(
+            'SELECT status FROM attendance WHERE student_id = ?',
+            ('STU-1',),
+        ).fetchone()
+        conn.close()
+        self.assertIsNone(student['face_encoding'])
+        self.assertIsNone(student['face_consent_at'])
+        self.assertIsNone(student['face_consent_version'])
+        self.assertEqual(history['status'], 'Present')
 
     def test_start_session_validates_class_and_prevents_two_active_sessions(self):
         self.add_student("STU-1")
@@ -302,6 +423,10 @@ class ClassSessionTests(unittest.TestCase):
         conn.execute(
             "INSERT INTO attendance (student_id, date, time_in, status) VALUES ('STU-1', '2026-10-01', '09:00', 'Present')"
         )
+        conn.execute(
+            'UPDATE students SET face_encoding = ? WHERE student_id = ?',
+            (np.ones(128).tobytes(), 'STU-1'),
+        )
         conn.commit()
         conn.close()
 
@@ -310,11 +435,21 @@ class ClassSessionTests(unittest.TestCase):
         conn = attendance_app.get_db()
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(attendance)")}
         record = conn.execute("SELECT * FROM attendance").fetchone()
+        migrated_student = conn.execute(
+            'SELECT face_consent_at, face_consent_version FROM students WHERE student_id = ?',
+            ('STU-1',),
+        ).fetchone()
         conn.close()
         self.assertIn("session_id", columns)
         self.assertEqual(record["student_id"], "STU-1")
         self.assertEqual(record["date"], "2026-10-01")
         self.assertIsNone(record["session_id"])
+        self.assertIsNone(migrated_student['face_consent_at'])
+        self.assertIsNone(migrated_student['face_consent_version'])
+        with tempfile.TemporaryDirectory() as faces_dir:
+            with patch.object(attendance_app, 'FACES_DIR', faces_dir):
+                attendance_app.invalidate_face_cache()
+                self.assertEqual(attendance_app.load_known_faces(), ([], []))
 
 
 if __name__ == "__main__":

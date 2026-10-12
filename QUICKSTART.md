@@ -62,6 +62,7 @@ Sign in with the administrator account you created. Administrators can create te
    - **Email:** `john@school.edu` (optional)
    - **Class:** `10-A`
    - **Face Photo:** Upload a clear front-facing photo
+   - Confirm the face-data consent checkbox (obtain parent/guardian consent where required)
 3. Click **"Register Student"**
 4. Repeat for more students
 

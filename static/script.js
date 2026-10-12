@@ -52,6 +52,19 @@ function setupEventListeners() {
     document.getElementById('uploadBtn').addEventListener('click', uploadAndRecognize);
     document.getElementById('registrationForm').addEventListener('submit', registerStudent);
     document.getElementById('facePhoto').addEventListener('change', previewPhoto);
+    document.getElementById('faceEnrollmentForm').addEventListener('submit', saveFaceEnrollment);
+    document.getElementById('cancelFaceEnrollmentBtn').addEventListener('click', () => {
+        document.getElementById('faceEnrollmentDialog').close();
+    });
+    document.getElementById('studentsBody').addEventListener('click', (event) => {
+        const enrollButton = event.target.closest('[data-enroll-student]');
+        const deleteButton = event.target.closest('[data-delete-student-face]');
+        if (enrollButton) {
+            openFaceEnrollment(enrollButton.dataset.enrollStudent, enrollButton.dataset.studentName);
+        } else if (deleteButton) {
+            deleteStudentFace(deleteButton.dataset.deleteStudentFace);
+        }
+    });
     document.getElementById('generateReportBtn').addEventListener('click', generateReport);
     document.getElementById('exportReportBtn').addEventListener('click', exportReport);
     document.getElementById('refreshDashboardBtn').addEventListener('click', loadDashboard);
@@ -88,14 +101,14 @@ function escapeHtml(value) {
 
 async function apiJson(url, options) {
     const res = await fetch(url, options);
-    if (res.status === 401 && url !== '/api/auth/login') {
-        showStaffLogin();
-    }
     let data = null;
     try {
         data = await res.json();
     } catch (_) {
         data = { success: false, message: 'Invalid server response' };
+    }
+    if (res.status === 401 && data.message === 'Sign in required') {
+        showStaffLogin();
     }
     return { res, data };
 }
@@ -111,6 +124,10 @@ function showStaffLogin() {
     document.getElementById('reportBody').innerHTML = '';
     document.getElementById('registrationForm').reset();
     document.getElementById('photoPreview').hidden = true;
+    document.getElementById('photoPreview').removeAttribute('src');
+    document.getElementById('faceEnrollmentForm').reset();
+    const faceEnrollmentDialog = document.getElementById('faceEnrollmentDialog');
+    if (faceEnrollmentDialog.open) faceEnrollmentDialog.close();
     document.getElementById('imageUpload').value = '';
     document.getElementById('resultContent').innerHTML = '<p class="result-idle">Results appear here after a scan.</p>';
     currentReportData = [];
@@ -376,6 +393,10 @@ async function registerStudent(e) {
         showNotification('Please select a face photo', 'error');
         return;
     }
+    if (!document.getElementById('faceConsent').checked) {
+        showNotification('Confirm face-data consent before registering', 'error');
+        return;
+    }
 
     const formData = new FormData();
     formData.append('student_id', document.getElementById('studentId').value.trim());
@@ -383,6 +404,7 @@ async function registerStudent(e) {
     formData.append('email', document.getElementById('studentEmail').value.trim());
     formData.append('class_name', document.getElementById('studentClass').value.trim());
     formData.append('image', photoFile);
+    formData.append('face_consent', 'true');
 
     submitBtn.disabled = true;
     submitBtn.textContent = 'Registering…';
@@ -414,12 +436,15 @@ async function loadStudents() {
         tbody.innerHTML = '';
 
         if (!Array.isArray(data) || data.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" class="empty">No students registered yet</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="empty">No students registered yet</td></tr>';
             return;
         }
 
         data.forEach((student) => {
             const date = student.created_at ? new Date(student.created_at).toLocaleDateString() : '—';
+            const faceStatus = student.face_data_present
+                ? (student.face_consent_at ? 'Active' : 'Consent missing')
+                : 'Not stored';
             const row = document.createElement('tr');
             row.innerHTML = `
                 <td>${escapeHtml(student.student_id)}</td>
@@ -427,11 +452,82 @@ async function loadStudents() {
                 <td>${escapeHtml(student.email || '—')}</td>
                 <td>${escapeHtml(student.class_name)}</td>
                 <td>${escapeHtml(date)}</td>
+                <td>${student.face_consent_at ? `Recorded ${escapeHtml(new Date(student.face_consent_at).toLocaleDateString())}` : 'Not recorded'}</td>
+                <td>${faceStatus}</td>
+                <td class="student-face-actions">
+                    <button type="button" class="btn btn-secondary btn-small" data-enroll-student="${escapeHtml(student.student_id)}" data-student-name="${escapeHtml(student.name)}">Update / consent</button>
+                    ${student.face_data_present ? `<button type="button" class="btn btn-ghost btn-small" data-delete-student-face="${escapeHtml(student.student_id)}">Delete face data</button>` : ''}
+                </td>
             `;
             tbody.appendChild(row);
         });
     } catch (err) {
         console.error(err);
+    }
+}
+
+function openFaceEnrollment(studentId, studentName) {
+    const dialog = document.getElementById('faceEnrollmentDialog');
+    dialog.dataset.studentId = studentId;
+    document.getElementById('faceEnrollmentStudent').textContent = `${studentName} (${studentId})`;
+    document.getElementById('faceEnrollmentForm').reset();
+    dialog.showModal();
+}
+
+async function saveFaceEnrollment(event) {
+    event.preventDefault();
+    const dialog = document.getElementById('faceEnrollmentDialog');
+    const file = document.getElementById('replacementFacePhoto').files[0];
+    if (!file || !document.getElementById('replacementFaceConsent').checked) {
+        showNotification('Choose a photo and confirm current consent', 'error');
+        return;
+    }
+    const button = document.getElementById('saveFaceEnrollmentBtn');
+    const formData = new FormData();
+    formData.append('image', file);
+    formData.append('face_consent', 'true');
+    button.disabled = true;
+    try {
+        const studentId = dialog.dataset.studentId;
+        const { res, data } = await apiJson(
+            `/api/students/${encodeURIComponent(studentId)}/face-data`,
+            { method: 'POST', body: formData },
+        );
+        if (!res.ok || !data.success) {
+            showNotification(data.message || 'Could not update face data', 'error');
+            return;
+        }
+        dialog.close();
+        showNotification(data.message, 'success');
+        await loadStudents();
+    } catch (err) {
+        showNotification('Could not update face data: ' + err.message, 'error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function deleteStudentFace(studentId) {
+    if (!window.confirm('Delete this student’s stored face image and encoding? Attendance history will remain.')) {
+        return;
+    }
+    try {
+        const { res, data } = await apiJson(
+            `/api/students/${encodeURIComponent(studentId)}/face-data`,
+            {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ confirm: true }),
+            },
+        );
+        if (!res.ok || !data.success) {
+            showNotification(data.message || 'Could not delete face data', 'error');
+            return;
+        }
+        showNotification(data.message, 'success');
+        await loadStudents();
+    } catch (err) {
+        showNotification('Could not delete face data: ' + err.message, 'error');
     }
 }
 

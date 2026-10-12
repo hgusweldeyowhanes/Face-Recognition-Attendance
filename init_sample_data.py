@@ -55,12 +55,12 @@ def init_database():
     conn.close()
 
 def add_sample_student(student_id, name, email, class_name):
-    """Add a sample student without face encoding (for testing)"""
+    """Add a sample student with a dummy encoding that consent policy excludes."""
     try:
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
         
-        # Create a dummy face encoding for testing
+        # Sample vectors are not valid face data and have no consent record.
         dummy_encoding = np.random.randn(128).tobytes()
         
         c.execute('''INSERT INTO students (student_id, name, email, class_name, face_encoding)
@@ -210,7 +210,7 @@ def main():
     print("  2. Visit: http://localhost:5000")
     print("  3. View the dashboard to see statistics")
     print("  4. Generate reports for different classes and dates")
-    print("\n⚠️  Note: These students have dummy face encodings.")
+    print("\n⚠️  Note: Dummy sample encodings are not recognized; enroll real faces only after consent.")
     print("   To register real faces, use the 'Register Student' tab.")
     print("=" * 60)
 

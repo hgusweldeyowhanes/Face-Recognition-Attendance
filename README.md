@@ -11,6 +11,7 @@ Face recognition attendance for classrooms. Flask API + modern web UI. Students 
 - Session close-out that records absences for the enrolled class
 - Staff sign-in with administrator/teacher roles
 - Administrator-created teacher accounts
+- Explicit face-data consent, re-enrollment, and administrator deletion
 - Attendance reports + CSV export
 - Encoding cache (DB-backed) for faster recognition
 - `/health` endpoint for monitoring
@@ -106,7 +107,9 @@ See `.env.example` for all options. Important ones:
 | POST | `/api/sessions` | Start a class session (`class_name`, optional `grace_minutes`, default 10) |
 | POST | `/api/sessions/<id>/close` | Close a session and record absences |
 | GET | `/api/students` | List students |
-| POST | `/api/students/add` | Register + face photo |
+| POST | `/api/students/add` | Register + face photo (requires `face_consent=true`) |
+| POST | `/api/students/<id>/face-data` | Replace/enroll face data (requires `face_consent=true`, admin only) |
+| DELETE | `/api/students/<id>/face-data` | Delete image, encoding, and consent record; retains attendance (admin only, requires `{"confirm": true}`) |
 | POST | `/api/recognize` | Recognize + mark present |
 | GET | `/api/attendance/summary` | Class summary |
 | GET | `/api/attendance/report` | Daily report; add `session_id` for a session-specific report |
@@ -121,9 +124,11 @@ Use IDs like `MI-01` — **no** `/` or `\` (those create folders on disk).
 
 Start a session for the class from the **Sessions** tab before checking students in. The default late grace period is 10 minutes and can be set from 0 to 120 minutes. Check-ins before the grace period ends are marked **Present**; later check-ins are marked **Late**. Close the session when class ends to record **Absent** for students who did not check in. A class can have one open session per date.
 
-## Security note
+## Privacy and consent
 
-Attendance, roster, reports, and session APIs require a staff sign-in. Only administrators can create teacher accounts or manage student registration. Create the first administrator through the CLI command above. Liveness detection, consent workflows, and biometric retention controls are not implemented yet; do not expose this publicly or use real student biometric data until those safeguards are in place.
+Attendance, roster, reports, and session APIs require a staff sign-in. Only administrators can create teacher accounts, enroll students, or delete face data. Create the first administrator through the CLI command above.
+
+Face enrollment requires an explicit confirmation that the student (or their parent/guardian where required) has been informed and consented. The app stores a consent timestamp/version with the face encoding. Existing records from before this feature have no consent record and are excluded from recognition until an administrator re-enrolls them with consent. Administrators can delete the face image, encoding, and consent record while retaining attendance history. Face data is not automatically deleted after a time period; liveness detection is also not implemented. Review applicable privacy requirements before real deployment, and do not expose this publicly until those policies and safeguards are appropriate for your use.
 
 ## License
 

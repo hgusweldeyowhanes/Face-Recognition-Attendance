@@ -7,6 +7,7 @@ import click
 import sqlite3
 import os
 import re
+import shutil
 import logging
 import face_recognition
 import numpy as np
@@ -51,6 +52,7 @@ MAIL_USERNAME = os.getenv('MAIL_USERNAME', '')
 MAIL_PASSWORD = os.getenv('MAIL_PASSWORD', '')
 HOST = os.getenv('HOST', '127.0.0.1')
 PORT = int(os.getenv('PORT', '5000'))
+FACE_CONSENT_VERSION = 'attendance-face-consent-v1'
 
 if FLASK_ENV == 'production' and (
     len(SECRET_KEY) < 32
@@ -103,8 +105,17 @@ def init_db():
         email TEXT,
         class_name TEXT,
         face_encoding BLOB,
+        face_consent_at TEXT,
+        face_consent_version TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+    student_columns = {
+        row['name'] for row in c.execute('PRAGMA table_info(students)').fetchall()
+    }
+    if 'face_consent_at' not in student_columns:
+        c.execute('ALTER TABLE students ADD COLUMN face_consent_at TEXT')
+    if 'face_consent_version' not in student_columns:
+        c.execute('ALTER TABLE students ADD COLUMN face_consent_version TEXT')
     c.execute('''CREATE TABLE IF NOT EXISTS staff_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
@@ -217,15 +228,42 @@ def invalidate_face_cache():
 def load_known_faces():
     """Load encodings from DB (fast). Fall back to disk if blob missing."""
     with _cache_lock:
-        if _face_cache['encodings'] is not None:
+        cache_loaded = _face_cache['encodings'] is not None
+        cached_encodings = _face_cache['encodings']
+        cached_ids = _face_cache['ids']
+
+    if cache_loaded:
+        conn = get_db()
+        authorized_ids = {
+            row['student_id']
+            for row in conn.execute(
+                'SELECT student_id FROM students WHERE face_consent_at IS NOT NULL'
+            ).fetchall()
+        }
+        conn.close()
+        with _cache_lock:
+            filtered = [
+                (encoding, student_id)
+                for encoding, student_id in zip(cached_encodings, cached_ids)
+                if student_id in authorized_ids
+            ]
+            _face_cache['encodings'] = [encoding for encoding, _ in filtered]
+            _face_cache['ids'] = [student_id for _, student_id in filtered]
             return _face_cache['encodings'], _face_cache['ids']
 
     known_encodings = []
     known_ids = []
     conn = get_db()
     rows = conn.execute(
-        'SELECT student_id, face_encoding FROM students WHERE face_encoding IS NOT NULL'
+        '''SELECT student_id, face_encoding FROM students
+           WHERE face_encoding IS NOT NULL AND face_consent_at IS NOT NULL'''
     ).fetchall()
+    authorized_ids = {
+        row['student_id']
+        for row in conn.execute(
+            'SELECT student_id FROM students WHERE face_consent_at IS NOT NULL'
+        ).fetchall()
+    }
     conn.close()
 
     for row in rows:
@@ -242,7 +280,7 @@ def load_known_faces():
     if not known_encodings and os.path.isdir(FACES_DIR):
         for person_name in os.listdir(FACES_DIR):
             person_dir = os.path.join(FACES_DIR, person_name)
-            if not os.path.isdir(person_dir):
+            if person_name not in authorized_ids or not os.path.isdir(person_dir):
                 continue
             for image_name in os.listdir(person_dir):
                 image_path = os.path.join(person_dir, image_name)
@@ -270,7 +308,7 @@ def get_student(student_id):
     return row
 
 
-def add_student(student_id, name, email, class_name, face_path):
+def add_student(student_id, name, email, class_name, face_path, consent_confirmed=False):
     student_id = sanitize_id(student_id)
     name = (name or '').strip()
     class_name = (class_name or '').strip()
@@ -282,6 +320,10 @@ def add_student(student_id, name, email, class_name, face_path):
         return False, 'Name is required'
     if not class_name:
         return False, 'Class is required'
+    if not consent_confirmed:
+        return False, 'Explicit face-data consent is required'
+    if get_student(student_id):
+        return False, 'Student ID already exists; use the roster to re-enroll the face'
 
     try:
         encoding = encode_face(face_path)
@@ -302,6 +344,15 @@ def add_student(student_id, name, email, class_name, face_path):
                    VALUES (?, ?, ?, ?, ?)''',
                 (student_id, name, email, class_name, encoding.tobytes()),
             )
+            conn.execute(
+                '''UPDATE students SET face_consent_at = ?, face_consent_version = ?
+                   WHERE student_id = ?''',
+                (
+                    datetime.now().astimezone().isoformat(timespec='seconds'),
+                    FACE_CONSENT_VERSION,
+                    student_id,
+                ),
+            )
             conn.commit()
         finally:
             conn.close()
@@ -314,6 +365,51 @@ def add_student(student_id, name, email, class_name, face_path):
     except Exception as e:
         logger.exception('Failed to add student')
         return False, 'Registration failed' if FLASK_ENV == 'production' else str(e)
+
+
+def update_student_face(student_id, face_path, consent_confirmed=False):
+    student_id = sanitize_id(student_id)
+    if not student_id:
+        return False, 'Invalid student ID'
+    if not consent_confirmed:
+        return False, 'Explicit face-data consent is required'
+    if not get_student(student_id):
+        return False, 'Student not found'
+
+    try:
+        encoding = encode_face(face_path)
+        if encoding is None:
+            return False, 'No face detected in image'
+
+        image = face_recognition.load_image_file(face_path)
+        student_dir = os.path.join(FACES_DIR, student_id)
+        os.makedirs(student_dir, exist_ok=True)
+        face_save_path = os.path.join(student_dir, f'{student_id}.jpg')
+        if not cv2.imwrite(face_save_path, cv2.cvtColor(image, cv2.COLOR_RGB2BGR)):
+            return False, 'Failed to save face image'
+
+        conn = get_db()
+        try:
+            conn.execute(
+                '''UPDATE students
+                   SET face_encoding = ?, face_consent_at = ?, face_consent_version = ?
+                   WHERE student_id = ?''',
+                (
+                    encoding.tobytes(),
+                    datetime.now().astimezone().isoformat(timespec='seconds'),
+                    FACE_CONSENT_VERSION,
+                    student_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        invalidate_face_cache()
+        return True, 'Face data updated and consent recorded'
+    except Exception as e:
+        logger.exception('Failed to update face data for student %s', student_id)
+        return False, 'Face data update failed' if FLASK_ENV == 'production' else str(e)
 
 
 def mark_attendance(student_id, date, time_in, status='Present', time_out=None, session_id=None):
@@ -787,10 +883,18 @@ def close_session(session_id):
 def get_students():
     conn = get_db()
     students = conn.execute(
-        'SELECT id, student_id, name, email, class_name, created_at FROM students ORDER BY name'
+        '''SELECT id, student_id, name, email, class_name, face_consent_at,
+                  face_encoding IS NOT NULL AS has_encoding, created_at
+           FROM students ORDER BY name'''
     ).fetchall()
     conn.close()
-    return jsonify([dict(s) for s in students])
+    result = []
+    for student in students:
+        row = dict(student)
+        student_dir = os.path.join(FACES_DIR, sanitize_id(row['student_id']))
+        row['face_data_present'] = bool(row.pop('has_encoding') or os.path.lexists(student_dir))
+        result.append(row)
+    return jsonify(result)
 
 
 @app.route('/api/students/add', methods=['POST'])
@@ -812,6 +916,8 @@ def add_student_api():
 
     if not all([student_id, name, class_name]):
         return api_error('Missing required fields')
+    if request.form.get('face_consent') != 'true':
+        return api_error('Explicit face-data consent is required')
 
     student_id = sanitize_id(student_id)
     if not student_id:
@@ -820,12 +926,102 @@ def add_student_api():
     temp_path = safe_upload_path(file.filename)
     try:
         file.save(temp_path)
-        success, message = add_student(student_id, name, email, class_name, temp_path)
+        success, message = add_student(
+            student_id,
+            name,
+            email,
+            class_name,
+            temp_path,
+            consent_confirmed=True,
+        )
         status = 200 if success else 400
         return jsonify({'success': success, 'message': message}), status
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+@app.route('/api/students/<student_id>/face-data', methods=['POST'])
+@require_role('admin')
+def re_enroll_student_face(student_id):
+    if request.form.get('face_consent') != 'true':
+        return api_error('Explicit face-data consent is required')
+    file = request.files.get('image')
+    if not file or not file.filename:
+        return api_error('No image provided')
+    if not allowed_file(file.filename):
+        return api_error(f'Invalid file type. Allowed: {", ".join(sorted(ALLOWED_EXTENSIONS))}')
+
+    temp_path = safe_upload_path(file.filename)
+    try:
+        file.save(temp_path)
+        success, message = update_student_face(
+            student_id,
+            temp_path,
+            consent_confirmed=True,
+        )
+        return jsonify({'success': success, 'message': message}), 200 if success else 400
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+@app.route('/api/students/<student_id>/face-data', methods=['DELETE'])
+@require_role('admin')
+def delete_student_face(student_id):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or payload.get('confirm') is not True:
+        return api_error('Explicit confirmation is required to delete face data')
+    student_id = sanitize_id(student_id)
+    if not student_id:
+        return api_error('Invalid student ID')
+
+    conn = get_db()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        student = conn.execute(
+            'SELECT student_id FROM students WHERE student_id = ?',
+            (student_id,),
+        ).fetchone()
+        if not student:
+            conn.rollback()
+            return api_error('Student not found', 404)
+        conn.execute(
+            '''UPDATE students
+               SET face_encoding = NULL, face_consent_at = NULL, face_consent_version = NULL
+               WHERE student_id = ?''',
+            (student_id,),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception('Failed to revoke face data for student %s', student_id)
+        return api_error('Could not revoke face data', 500)
+    finally:
+        conn.close()
+
+    invalidate_face_cache()
+    faces_root = os.path.abspath(FACES_DIR)
+    student_dir = os.path.abspath(os.path.join(FACES_DIR, student_id))
+    try:
+        if os.path.commonpath([faces_root, student_dir]) != faces_root:
+            raise ValueError('Student face directory is outside the face storage directory')
+        if os.path.islink(student_dir) or os.path.isfile(student_dir):
+            os.remove(student_dir)
+        elif os.path.isdir(student_dir):
+            shutil.rmtree(student_dir)
+    except Exception:
+        logger.exception('Face data revoked but image files could not be fully removed for %s', student_id)
+        return jsonify({
+            'success': False,
+            'face_data_inactive': True,
+            'message': 'Recognition is disabled, but stored face files could not be fully deleted. Contact the system administrator.',
+        }), 500
+
+    return jsonify({
+        'success': True,
+        'message': 'Face image, encoding, and consent record deleted; attendance history was retained.',
+    })
 
 
 @app.route('/api/recognize', methods=['POST'])
@@ -861,6 +1057,8 @@ def recognize_face():
             student_id = known_ids[best_match_index]
             student = get_student(student_id)
             if student:
+                if not student['face_consent_at']:
+                    return api_error('Face recognition consent is not active', 403)
                 now = datetime.now().astimezone()
                 today = now.strftime('%Y-%m-%d')
                 conn = get_db()

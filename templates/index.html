@@ -282,6 +282,13 @@
                                 <img id="photoPreview" class="photo-preview" alt="Face preview" hidden>
                             </div>
                         </div>
+                        <div class="field consent-field">
+                            <p class="consent-notice">The face photo and derived face encoding are stored and used only for attendance. Face data remains until an administrator deletes it; attendance records are retained separately.</p>
+                            <label class="consent-option">
+                                <input type="checkbox" id="faceConsent" required>
+                                <span>I confirm that the student, or their parent/guardian where required, has been informed and has consented to this face-data use.</span>
+                            </label>
+                        </div>
                         <button type="submit" class="btn btn-primary" id="registerSubmitBtn">Register student</button>
                     </form>
 
@@ -298,10 +305,13 @@
                                         <th>Email</th>
                                         <th>Class</th>
                                         <th>Joined</th>
+                                        <th>Face consent</th>
+                                        <th>Face data</th>
+                                        <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="studentsBody">
-                                    <tr><td colspan="5" class="empty">Loading…</td></tr>
+                                    <tr><td colspan="8" class="empty">Loading…</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -309,6 +319,28 @@
                 </div>
             </div>
         </section>
+
+        <dialog id="faceEnrollmentDialog" class="face-dialog">
+            <form id="faceEnrollmentForm" class="panel">
+                <p class="eyebrow">Face enrollment</p>
+                <h2>Update face data</h2>
+                <p class="lede">Student: <strong id="faceEnrollmentStudent"></strong></p>
+                <div class="field">
+                    <label for="replacementFacePhoto">New face photo</label>
+                    <input type="file" id="replacementFacePhoto" accept="image/jpeg,image/png,image/webp" required>
+                </div>
+                <div class="field">
+                    <label class="consent-option">
+                        <input type="checkbox" id="replacementFaceConsent" required>
+                        <span>I confirm that current consent to store and use this student's face data has been obtained.</span>
+                    </label>
+                </div>
+                <div class="filter-actions">
+                    <button type="button" class="btn btn-secondary" id="cancelFaceEnrollmentBtn">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="saveFaceEnrollmentBtn">Save face data</button>
+                </div>
+            </form>
+        </dialog>
 
         <!-- Reports -->
         <section id="reports" class="page" aria-label="Reports" hidden>

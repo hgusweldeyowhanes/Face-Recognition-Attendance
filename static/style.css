@@ -549,6 +549,48 @@ tbody tr:hover {
     color: var(--ink-soft);
 }
 
+.consent-notice {
+    margin-bottom: 0.65rem;
+    color: var(--ink-soft);
+    font-size: 0.85rem;
+}
+
+.consent-option {
+    display: flex !important;
+    align-items: flex-start;
+    gap: 0.6rem;
+    font-size: 0.86rem !important;
+    font-weight: 400 !important;
+    line-height: 1.45;
+    cursor: pointer;
+}
+
+.consent-option input[type="checkbox"] {
+    flex: 0 0 auto;
+    width: auto;
+    margin-top: 0.2rem;
+}
+
+.face-dialog {
+    width: min(560px, calc(100% - 2rem));
+    max-height: calc(100% - 2rem);
+    margin: auto;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius);
+    background: transparent;
+    overflow: auto;
+}
+
+.face-dialog::backdrop {
+    background: rgba(12, 26, 36, 0.58);
+    backdrop-filter: blur(3px);
+}
+
+.face-dialog form {
+    padding: 1.5rem;
+}
+
 input[type="text"],
 input[type="email"],
 input[type="password"],
@@ -584,6 +626,12 @@ select:focus {
     margin-top: 0.75rem;
     max-width: 180px;
     border-radius: 12px;
+}
+
+.student-face-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
 }
 
 .filters {
