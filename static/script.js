@@ -33,6 +33,10 @@ function showPage(pageName, activeBtn) {
         loadClasses();
     } else if (pageName === 'reports') {
         loadClasses();
+        loadSessions();
+    } else if (pageName === 'sessions') {
+        loadClasses();
+        loadSessions(localDateInputValue());
     } else if (pageName === 'dashboard') {
         loadDashboard();
     } else if (pageName !== 'attendance') {
@@ -49,10 +53,22 @@ function setupEventListeners() {
     document.getElementById('generateReportBtn').addEventListener('click', generateReport);
     document.getElementById('exportReportBtn').addEventListener('click', exportReport);
     document.getElementById('refreshDashboardBtn').addEventListener('click', loadDashboard);
+    document.getElementById('startSessionForm').addEventListener('submit', startSession);
+    document.getElementById('refreshSessionsBtn').addEventListener('click', loadSessions);
+    document.getElementById('sessionsBody').addEventListener('click', (event) => {
+        const button = event.target.closest('[data-close-session]');
+        if (button) closeSession(button.dataset.closeSession);
+    });
+    document.getElementById('reportDate').addEventListener('change', loadSessions);
 }
 
 function setReportDate() {
-    document.getElementById('reportDate').value = new Date().toISOString().split('T')[0];
+    document.getElementById('reportDate').value = localDateInputValue();
+}
+
+function localDateInputValue(date = new Date()) {
+    const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return localDate.toISOString().split('T')[0];
 }
 
 function escapeHtml(value) {
@@ -209,7 +225,7 @@ async function recognizeFromBlob(blob) {
     try {
         const { data } = await apiJson('/api/recognize', { method: 'POST', body: formData });
         if (data.success) {
-            displayRecognitionSuccess(data.student, data.confidence);
+            displayRecognitionSuccess(data.student, data.confidence, data.attendance_status);
         } else {
             displayRecognitionError(data.message || 'Recognition failed');
         }
@@ -220,14 +236,14 @@ async function recognizeFromBlob(blob) {
     }
 }
 
-function displayRecognitionSuccess(student, confidence) {
+function displayRecognitionSuccess(student, confidence, attendanceStatus) {
     const resultDiv = document.getElementById('recognitionResult');
     const contentDiv = document.getElementById('resultContent');
     const time = new Date().toLocaleTimeString();
     const conf = confidence != null ? Math.round(confidence * 100) : null;
 
     contentDiv.innerHTML = `
-        <h3>Checked in</h3>
+        <h3>${escapeHtml(attendanceStatus || 'Checked in')}</h3>
         <p><strong>${escapeHtml(student.name)}</strong></p>
         <p>ID ${escapeHtml(student.student_id)} · ${escapeHtml(student.class)}</p>
         <p>${escapeHtml(time)}${conf != null ? ` · ${conf}% match` : ''}</p>
@@ -335,25 +351,124 @@ async function loadClasses(force = false) {
     if (classesLoaded && !force) return;
     try {
         const { data } = await apiJson('/api/classes');
-        const select = document.getElementById('reportClass');
-        const current = select.value;
-        select.innerHTML = '<option value="">All classes</option>';
+        const reportSelect = document.getElementById('reportClass');
+        const currentReportClass = reportSelect.value;
+        reportSelect.innerHTML = '<option value="">All classes</option>';
+        const sessionSelect = document.getElementById('sessionClass');
+        const currentSessionClass = sessionSelect.value;
+        sessionSelect.innerHTML = '<option value="">Select a class</option>';
         (Array.isArray(data) ? data : []).forEach((className) => {
             const option = document.createElement('option');
             option.value = className;
             option.textContent = className;
-            select.appendChild(option);
+            reportSelect.appendChild(option);
+            const sessionOption = option.cloneNode(true);
+            sessionSelect.appendChild(sessionOption);
         });
-        if (current) select.value = current;
+        if (currentReportClass) reportSelect.value = currentReportClass;
+        if (currentSessionClass) sessionSelect.value = currentSessionClass;
         classesLoaded = true;
     } catch (err) {
         console.error(err);
     }
 }
 
+async function loadSessions(dateOverride = '') {
+    const date = (typeof dateOverride === 'string' && dateOverride)
+        || document.getElementById('reportDate').value
+        || localDateInputValue();
+    try {
+        const { data } = await apiJson(`/api/sessions?date=${encodeURIComponent(date)}`);
+        const sessions = Array.isArray(data) ? data : [];
+        const tbody = document.getElementById('sessionsBody');
+        tbody.innerHTML = '';
+        if (!sessions.length) {
+            tbody.innerHTML = '<tr><td colspan="8" class="empty">No sessions for this date</td></tr>';
+        }
+
+        sessions.forEach((session) => {
+            const row = document.createElement('tr');
+            const started = session.started_at ? new Date(session.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
+            const state = session.ended_at ? 'Closed' : 'Active';
+            row.innerHTML = `
+                <td>${escapeHtml(session.class_name)}</td>
+                <td>${escapeHtml(started)}</td>
+                <td>${session.grace_minutes} min</td>
+                <td>${session.checked_in_count}/${session.enrolled_count}</td>
+                <td>${session.late_count}</td>
+                <td>${session.absent_count}</td>
+                <td><span class="status-pill ${session.ended_at ? 'absent' : 'present'}">${state}</span></td>
+                <td>${session.ended_at ? '' : `<button type="button" class="btn btn-secondary btn-small" data-close-session="${session.id}">Close</button>`}</td>
+            `;
+            tbody.appendChild(row);
+        });
+
+        if (date === document.getElementById('reportDate').value) {
+            const reportSelect = document.getElementById('reportSession');
+            const currentSession = reportSelect.value;
+            reportSelect.innerHTML = '<option value="">Whole day</option>';
+            sessions.forEach((session) => {
+                const option = document.createElement('option');
+                option.value = session.id;
+                option.textContent = `${session.class_name} · ${new Date(session.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${session.ended_at ? '' : ' · active'}`;
+                reportSelect.appendChild(option);
+            });
+            if (currentSession && sessions.some((session) => String(session.id) === currentSession)) {
+                reportSelect.value = currentSession;
+            }
+        }
+    } catch (err) {
+        console.error(err);
+        showNotification('Could not load sessions', 'error');
+    }
+}
+
+async function startSession(event) {
+    event.preventDefault();
+    const button = document.getElementById('startSessionBtn');
+    const className = document.getElementById('sessionClass').value;
+    const graceMinutes = document.getElementById('sessionGrace').value;
+    button.disabled = true;
+    try {
+        const { res, data } = await apiJson('/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ class_name: className, grace_minutes: Number(graceMinutes) }),
+        });
+        if (!res.ok || !data.success) {
+            showNotification(data.message || 'Could not start session', 'error');
+            return;
+        }
+        showNotification(`Session started for ${className}`, 'success');
+        await loadSessions();
+    } catch (err) {
+        showNotification('Could not start session: ' + err.message, 'error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function closeSession(sessionId) {
+    try {
+        const { res, data } = await apiJson(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
+            method: 'POST',
+        });
+        if (!res.ok || !data.success) {
+            showNotification(data.message || 'Could not close session', 'error');
+            return;
+        }
+        showNotification('Session closed; absences recorded', 'success');
+        await loadSessions();
+        await loadDashboard();
+    } catch (err) {
+        showNotification('Could not close session: ' + err.message, 'error');
+    }
+}
+
 async function generateReport() {
     const date = document.getElementById('reportDate').value;
     const classFilter = document.getElementById('reportClass').value;
+    const sessionFilter = document.getElementById('reportSession').value;
     if (!date) {
         showNotification('Please select a date', 'error');
         return;
@@ -361,6 +476,7 @@ async function generateReport() {
 
     let url = `/api/attendance/report?date=${encodeURIComponent(date)}`;
     if (classFilter) url += `&class=${encodeURIComponent(classFilter)}`;
+    if (sessionFilter) url += `&session_id=${encodeURIComponent(sessionFilter)}`;
 
     try {
         const { data } = await apiJson(url);
@@ -383,7 +499,7 @@ function displayReport(data) {
 
     data.forEach((record) => {
         const status = record.status || 'Absent';
-        const pillClass = status === 'Present' ? 'present' : 'absent';
+        const pillClass = status === 'Present' ? 'present' : (status === 'Late' ? 'late' : 'absent');
         const row = document.createElement('tr');
         row.innerHTML = `
             <td>${escapeHtml(record.student_id)}</td>

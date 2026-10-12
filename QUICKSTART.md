@@ -60,18 +60,19 @@ Open your browser and go to: **http://localhost:5000**
 
 ## Step 4: Mark Attendance (Starting automatic process)
 
+1. Click the **Sessions** tab and start a session for the student's class. The default late grace period is 10 minutes.
+2. Return to **Mark Attendance** and recognize students. Arrivals after the grace period are marked late.
+
 ### Option A: Using Webcam
-1. Click **"Mark Attendance"** tab
-2. Click **"Start Camera"**
-3. Position your face in the camera
-4. Click **"Capture & Recognize"**
-5. System marks your attendance if recognized
+1. Click **"Start Camera"**
+2. Position your face in the camera
+3. Click **"Capture & Recognize"**
+4. System marks your attendance if recognized
 
 ### Option B: Upload Photo
-1. Click **"Mark Attendance"** tab
-2. In "Upload Image" section:
-   - Select a student's face photo
-   - Click **"Upload & Recognize"**
+1. In "Upload Image", select a student's face photo
+2. Click **"Upload & Recognize"**
+3. When class ends, return to **Sessions** and close it to record absences
 
 ## Step 5: View Reports
 

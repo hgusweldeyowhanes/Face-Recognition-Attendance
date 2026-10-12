@@ -313,6 +313,11 @@ tbody tr:hover {
     color: var(--danger);
 }
 
+.status-pill.late {
+    background: rgba(201, 123, 42, 0.14);
+    color: #8a4b0e;
+}
+
 .rate-bar {
     display: inline-flex;
     align-items: center;
@@ -374,6 +379,11 @@ tbody tr:hover {
     background: transparent;
     color: var(--ink-soft);
     border: 1px solid var(--line);
+}
+
+.btn-small {
+    padding: 0.4rem 0.7rem;
+    border-radius: 9px;
 }
 
 .actions {
@@ -507,6 +517,7 @@ tbody tr:hover {
 input[type="text"],
 input[type="email"],
 input[type="date"],
+input[type="number"],
 input[type="file"],
 select {
     width: 100%;
@@ -541,10 +552,22 @@ select:focus {
 
 .filters {
     display: grid;
+    grid-template-columns: 1fr 1fr 1fr auto;
+    gap: 0.85rem;
+    align-items: end;
+    margin-bottom: 1rem;
+}
+
+.session-form {
+    display: grid;
     grid-template-columns: 1fr 1fr auto;
     gap: 0.85rem;
     align-items: end;
     margin-bottom: 1rem;
+}
+
+.session-form .field {
+    margin-bottom: 0;
 }
 
 .filter-actions {
@@ -598,7 +621,8 @@ select:focus {
     .stat-row,
     .checkin-layout,
     .register-layout,
-    .filters {
+    .filters,
+    .session-form {
         grid-template-columns: 1fr;
     }
 

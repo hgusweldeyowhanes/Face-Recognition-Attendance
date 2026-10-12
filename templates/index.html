@@ -21,6 +21,7 @@
             </a>
             <nav class="nav" role="tablist" aria-label="Main">
                 <button type="button" class="nav-btn active" data-page="dashboard" role="tab" aria-selected="true">Overview</button>
+                <button type="button" class="nav-btn" data-page="sessions" role="tab" aria-selected="false">Sessions</button>
                 <button type="button" class="nav-btn" data-page="attendance" role="tab" aria-selected="false">Check in</button>
                 <button type="button" class="nav-btn" data-page="register" role="tab" aria-selected="false">Register</button>
                 <button type="button" class="nav-btn" data-page="reports" role="tab" aria-selected="false">Reports</button>
@@ -73,6 +74,59 @@
                             </thead>
                             <tbody id="summaryBody">
                                 <tr><td colspan="5" class="empty">Loading…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Sessions -->
+        <section id="sessions" class="page" aria-label="Class sessions" hidden>
+            <div class="shell">
+                <header class="page-head">
+                    <div>
+                        <p class="eyebrow">Class management</p>
+                        <h1>Class sessions</h1>
+                        <p class="lede">Start a session before check-in. Students arriving after the grace period are marked late; absences are recorded when you close the session.</p>
+                    </div>
+                    <button type="button" class="btn btn-ghost" id="refreshSessionsBtn">Refresh</button>
+                </header>
+
+                <form id="startSessionForm" class="panel session-form">
+                    <div class="field">
+                        <label for="sessionClass">Class</label>
+                        <select id="sessionClass" required>
+                            <option value="">Select a class</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="sessionGrace">Late grace period (minutes)</label>
+                        <input type="number" id="sessionGrace" value="10" min="0" max="120" step="1" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary" id="startSessionBtn">Start session</button>
+                </form>
+
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Today's sessions</h2>
+                    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Class</th>
+                                    <th>Started</th>
+                                    <th>Grace</th>
+                                    <th>Checked in</th>
+                                    <th>Late</th>
+                                    <th>Absent</th>
+                                    <th>State</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody id="sessionsBody">
+                                <tr><td colspan="8" class="empty">Loading…</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -213,6 +267,12 @@
                             <label for="reportClass">Class</label>
                             <select id="reportClass">
                                 <option value="">All classes</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="reportSession">Session <span class="optional">optional</span></label>
+                            <select id="reportSession">
+                                <option value="">Whole day</option>
                             </select>
                         </div>
                         <div class="filter-actions">

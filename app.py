@@ -90,6 +90,27 @@ def init_db():
         face_encoding BLOB,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS class_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        class_name TEXT NOT NULL,
+        date DATE NOT NULL,
+        started_at TEXT NOT NULL,
+        grace_minutes INTEGER NOT NULL DEFAULT 10,
+        ended_at TEXT
+    )''')
+    attendance_exists = c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'attendance'"
+    ).fetchone()
+    if attendance_exists:
+        attendance_columns = {
+            row['name'] for row in c.execute('PRAGMA table_info(attendance)').fetchall()
+        }
+    else:
+        attendance_columns = set()
+
+    if attendance_exists and 'session_id' not in attendance_columns:
+        c.execute('ALTER TABLE attendance RENAME TO attendance_legacy')
+
     c.execute('''CREATE TABLE IF NOT EXISTS attendance (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         student_id TEXT NOT NULL,
@@ -97,9 +118,16 @@ def init_db():
         time_in TIME,
         time_out TIME,
         status TEXT DEFAULT 'Present',
+        session_id INTEGER,
         FOREIGN KEY (student_id) REFERENCES students(student_id),
-        UNIQUE(student_id, date)
+        FOREIGN KEY (session_id) REFERENCES class_sessions(id) ON DELETE CASCADE,
+        UNIQUE(student_id, session_id)
     )''')
+    if attendance_exists and 'session_id' not in attendance_columns:
+        c.execute('''INSERT INTO attendance (id, student_id, date, time_in, time_out, status)
+                     SELECT id, student_id, date, time_in, time_out, status
+                     FROM attendance_legacy''')
+        c.execute('DROP TABLE attendance_legacy')
     c.execute('''CREATE TABLE IF NOT EXISTS notifications (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         student_id TEXT NOT NULL,
@@ -109,6 +137,10 @@ def init_db():
         FOREIGN KEY (student_id) REFERENCES students(student_id)
     )''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_session ON attendance(session_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sessions_class_date ON class_sessions(class_name, date)')
+    c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_session_per_class
+                 ON class_sessions(class_name, date) WHERE ended_at IS NULL''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_students_class ON students(class_name)')
     conn.commit()
     conn.close()
@@ -259,16 +291,30 @@ def add_student(student_id, name, email, class_name, face_path):
         return False, 'Registration failed' if FLASK_ENV == 'production' else str(e)
 
 
-def mark_attendance(student_id, date, time_in, status='Present', time_out=None):
+def mark_attendance(student_id, date, time_in, status='Present', time_out=None, session_id=None):
     try:
         conn = get_db()
+        if session_id is not None:
+            conn.execute(
+                '''INSERT OR IGNORE INTO attendance
+                   (student_id, date, time_in, time_out, status, session_id)
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                (student_id, date, time_in, time_out, status, session_id),
+            )
+            attendance = conn.execute(
+                'SELECT status, time_in FROM attendance WHERE student_id = ? AND session_id = ?',
+                (student_id, session_id),
+            ).fetchone()
+            conn.commit()
+            return (True, attendance['status'], attendance['time_in']) if attendance else (False, None, None)
+
         existing = conn.execute(
-            'SELECT id FROM attendance WHERE student_id = ? AND date = ?',
+            'SELECT id FROM attendance WHERE student_id = ? AND date = ? AND session_id IS NULL',
             (student_id, date),
         ).fetchone()
         if existing:
             conn.execute(
-                'UPDATE attendance SET time_in = ?, time_out = COALESCE(?, time_out), status = ? WHERE student_id = ? AND date = ?',
+                'UPDATE attendance SET time_in = ?, time_out = COALESCE(?, time_out), status = ? WHERE student_id = ? AND date = ? AND session_id IS NULL',
                 (time_in, time_out, status, student_id, date),
             )
         else:
@@ -278,11 +324,43 @@ def mark_attendance(student_id, date, time_in, status='Present', time_out=None):
                 (student_id, date, time_in, time_out, status),
             )
         conn.commit()
-        conn.close()
-        return True
+        return True, status, time_in
     except Exception:
         logger.exception('Failed to mark attendance')
+        return False, None, None
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def validate_date(value):
+    if not value or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
         return False
+    try:
+        datetime.strptime(value, '%Y-%m-%d')
+        return True
+    except ValueError:
+        return False
+
+
+def session_rows(date):
+    conn = get_db()
+    rows = conn.execute(
+        '''SELECT cs.id, cs.class_name, cs.date, cs.started_at, cs.grace_minutes, cs.ended_at,
+                  COUNT(DISTINCT s.student_id) AS enrolled_count,
+                  COUNT(DISTINCT CASE WHEN a.status IN ('Present', 'Late') THEN a.student_id END) AS checked_in_count,
+                  COUNT(DISTINCT CASE WHEN a.status = 'Late' THEN a.student_id END) AS late_count,
+                  COUNT(DISTINCT CASE WHEN a.status = 'Absent' THEN a.student_id END) AS absent_count
+           FROM class_sessions cs
+           LEFT JOIN students s ON s.class_name = cs.class_name
+           LEFT JOIN attendance a ON a.session_id = cs.id
+           WHERE cs.date = ?
+           GROUP BY cs.id
+           ORDER BY cs.started_at DESC''',
+        (date,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 def check_out_student(student_id, date=None, time_out=None):
@@ -387,6 +465,124 @@ def health():
     }), status
 
 
+@app.route('/api/sessions', methods=['GET'])
+def get_sessions():
+    date = request.args.get('date') or datetime.now().strftime('%Y-%m-%d')
+    if not validate_date(date):
+        return api_error('date must use YYYY-MM-DD format')
+    return jsonify(session_rows(date))
+
+
+@app.route('/api/sessions', methods=['POST'])
+def start_session():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return api_error('Request body must be a JSON object')
+    class_name = (payload.get('class_name') or '').strip()
+    grace_minutes = payload.get('grace_minutes', 10)
+    if not class_name:
+        return api_error('class_name is required')
+    if isinstance(grace_minutes, bool) or not str(grace_minutes).isdigit():
+        return api_error('grace_minutes must be a whole number from 0 to 120')
+    grace_minutes = int(grace_minutes)
+    if not 0 <= grace_minutes <= 120:
+        return api_error('grace_minutes must be a whole number from 0 to 120')
+
+    now = datetime.now().astimezone()
+    conn = get_db()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        class_exists = conn.execute(
+            'SELECT 1 FROM students WHERE class_name = ? LIMIT 1', (class_name,)
+        ).fetchone()
+        if not class_exists:
+            conn.rollback()
+            return api_error('No registered students found for this class', 404)
+        active = conn.execute(
+            'SELECT id FROM class_sessions WHERE class_name = ? AND date = ? AND ended_at IS NULL',
+            (class_name, now.strftime('%Y-%m-%d')),
+        ).fetchone()
+        if active:
+            conn.rollback()
+            return api_error('This class already has an active session', 409)
+        cursor = conn.execute(
+            '''INSERT INTO class_sessions (class_name, date, started_at, grace_minutes)
+               VALUES (?, ?, ?, ?)''',
+            (class_name, now.strftime('%Y-%m-%d'), now.isoformat(timespec='seconds'), grace_minutes),
+        )
+        session_id = cursor.lastrowid
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return api_error('This class already has an active session', 409)
+    except Exception:
+        conn.rollback()
+        logger.exception('Failed to start class session')
+        return api_error('Could not start class session', 500)
+    finally:
+        conn.close()
+
+    return jsonify({
+        'success': True,
+        'session': {
+            'id': session_id,
+            'class_name': class_name,
+            'date': now.strftime('%Y-%m-%d'),
+            'started_at': now.isoformat(timespec='seconds'),
+            'grace_minutes': grace_minutes,
+            'ended_at': None,
+        },
+    }), 201
+
+
+@app.route('/api/sessions/<int:session_id>/close', methods=['POST'])
+def close_session(session_id):
+    now = datetime.now().astimezone().isoformat(timespec='seconds')
+    conn = get_db()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        session = conn.execute(
+            'SELECT id, class_name, date, ended_at FROM class_sessions WHERE id = ?',
+            (session_id,),
+        ).fetchone()
+        if not session:
+            conn.rollback()
+            return api_error('Session not found', 404)
+        if session['ended_at']:
+            conn.rollback()
+            return api_error('Session is already closed', 409)
+
+        conn.execute(
+            '''INSERT OR IGNORE INTO attendance
+               (student_id, date, status, session_id)
+               SELECT s.student_id, ?, 'Absent', ?
+               FROM students s
+               WHERE s.class_name = ?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM attendance a
+                     WHERE a.student_id = s.student_id AND a.session_id = ?
+                 )''',
+            (session['date'], session_id, session['class_name'], session_id),
+        )
+        conn.execute(
+            'UPDATE class_sessions SET ended_at = ? WHERE id = ?',
+            (now, session_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception('Failed to close class session %s', session_id)
+        return api_error('Could not close class session', 500)
+    finally:
+        conn.close()
+
+    return jsonify({
+        'success': True,
+        'message': 'Session closed and absences recorded',
+        'sessions': session_rows(session['date']),
+    })
+
+
 @app.route('/api/students', methods=['GET'])
 def get_students():
     conn = get_db()
@@ -464,13 +660,40 @@ def recognize_face():
             student_id = known_ids[best_match_index]
             student = get_student(student_id)
             if student:
-                today = datetime.now().strftime('%Y-%m-%d')
-                time_now = datetime.now().strftime('%H:%M:%S')
-                mark_attendance(student_id, today, time_now)
+                now = datetime.now().astimezone()
+                today = now.strftime('%Y-%m-%d')
+                conn = get_db()
+                session = conn.execute(
+                    '''SELECT id, started_at, grace_minutes FROM class_sessions
+                       WHERE class_name = ? AND date = ? AND ended_at IS NULL''',
+                    (student['class_name'], today),
+                ).fetchone()
+                conn.close()
+                if not session:
+                    return api_error(
+                        'No active session for this class. Ask the teacher to start one.',
+                        409,
+                    )
+
+                session_start = datetime.fromisoformat(session['started_at'])
+                time_now = now.strftime('%H:%M:%S')
+                grace_ends = session_start + timedelta(minutes=session['grace_minutes'])
+                attendance_status = 'Late' if now >= grace_ends else 'Present'
+                marked, attendance_status, time_now = mark_attendance(
+                    student_id,
+                    today,
+                    time_now,
+                    status=attendance_status,
+                    session_id=session['id'],
+                )
+                if not marked:
+                    return api_error('Could not save attendance', 500)
                 send_notification(student_id, 'attendance', f'Attendance marked at {time_now}')
                 return jsonify({
                     'success': True,
-                    'message': f"Welcome {student['name']}",
+                    'message': f"Welcome {student['name']} — {attendance_status.lower()}",
+                    'attendance_status': attendance_status,
+                    'session_id': session['id'],
                     'confidence': round(max(0.0, 1.0 - best_distance), 3),
                     'student': {
                         'id': student['id'],
@@ -494,34 +717,64 @@ def recognize_face():
 def get_attendance_report():
     date = request.args.get('date')
     class_name = request.args.get('class')
+    raw_session_id = request.args.get('session_id')
+    if raw_session_id and not raw_session_id.isdigit():
+        return api_error('session_id must be a positive integer')
+    session_id = int(raw_session_id) if raw_session_id else None
+    if date and not validate_date(date):
+        return api_error('date must use YYYY-MM-DD format')
 
     conn = get_db()
-    if date and class_name:
+    if session_id is not None:
+        session = conn.execute(
+            'SELECT class_name, date FROM class_sessions WHERE id = ?', (session_id,)
+        ).fetchone()
+        if not session:
+            conn.close()
+            return api_error('Session not found', 404)
+        if date and date != session['date']:
+            conn.close()
+            return api_error('Session does not belong to the selected date')
+        conditions = ['s.class_name = ?']
+        params = [session['date'], session_id, session['class_name']]
+        if class_name:
+            conditions.append('s.class_name = ?')
+            params.append(class_name)
         rows = conn.execute(
-            '''SELECT s.student_id, s.name, s.class_name AS class, a.date, a.time_in,
-                      COALESCE(a.status, 'Absent') AS status
-               FROM students s
-               LEFT JOIN attendance a ON s.student_id = a.student_id AND a.date = ?
-               WHERE s.class_name = ?
-               ORDER BY s.name''',
-            (date, class_name),
-        ).fetchall()
-    elif date:
-        rows = conn.execute(
-            '''SELECT s.student_id, s.name, s.class_name AS class, a.date, a.time_in,
-                      COALESCE(a.status, 'Absent') AS status
-               FROM students s
-               LEFT JOIN attendance a ON s.student_id = a.student_id AND a.date = ?
-               ORDER BY s.name''',
-            (date,),
+            f'''SELECT s.student_id, s.name, s.class_name AS class, ? AS date,
+                       a.time_in, COALESCE(a.status, 'Absent') AS status
+                FROM students s
+                LEFT JOIN attendance a
+                  ON a.student_id = s.student_id AND a.session_id = ?
+                WHERE {' AND '.join(conditions)}
+                ORDER BY s.name''',
+            params,
         ).fetchall()
     else:
+        attendance_filter = 'WHERE date = ?' if date else ''
+        attendance_params = [date] if date else []
+        conditions = []
+        params = []
+        if class_name:
+            conditions.append('s.class_name = ?')
+            params.append(class_name)
         rows = conn.execute(
-            '''SELECT s.student_id, s.name, s.class_name AS class, a.date, a.time_in,
-                      COALESCE(a.status, 'Absent') AS status
-               FROM students s
-               LEFT JOIN attendance a ON s.student_id = a.student_id
-               ORDER BY s.name'''
+            f'''SELECT s.student_id, s.name, s.class_name AS class,
+                       COALESCE(a.date, ?) AS date, a.time_in,
+                       COALESCE(a.status, 'Absent') AS status
+                FROM students s
+                LEFT JOIN (
+                    SELECT student_id, date, MIN(time_in) AS time_in,
+                           CASE MAX(CASE status WHEN 'Late' THEN 2
+                                                WHEN 'Present' THEN 1 ELSE 0 END)
+                               WHEN 2 THEN 'Late' WHEN 1 THEN 'Present' ELSE 'Absent' END AS status
+                    FROM attendance
+                    {attendance_filter}
+                    GROUP BY student_id, date
+                ) a ON a.student_id = s.student_id
+                {f"WHERE {' AND '.join(conditions)}" if conditions else ''}
+                ORDER BY s.name''',
+            [date, *attendance_params, *params],
         ).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
