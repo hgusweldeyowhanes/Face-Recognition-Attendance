@@ -397,7 +397,7 @@ async function loadSessions(dateOverride = '') {
                 <td>${session.checked_in_count}/${session.enrolled_count}</td>
                 <td>${session.late_count}</td>
                 <td>${session.absent_count}</td>
-                <td><span class="status-pill ${session.ended_at ? 'absent' : 'present'}">${state}</span></td>
+                <td><span class="status-pill ${session.ended_at ? 'closed' : 'present'}">${state}</span></td>
                 <td>${session.ended_at ? '' : `<button type="button" class="btn btn-secondary btn-small" data-close-session="${session.id}">Close</button>`}</td>
             `;
             tbody.appendChild(row);

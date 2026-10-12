@@ -138,6 +138,8 @@ def init_db():
     )''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_attendance_session ON attendance(session_id)')
+    c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_legacy_attendance_day
+                 ON attendance(student_id, date) WHERE session_id IS NULL''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_sessions_class_date ON class_sessions(class_name, date)')
     c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_session_per_class
                  ON class_sessions(class_name, date) WHERE ended_at IS NULL''')
@@ -363,7 +365,7 @@ def session_rows(date):
     return [dict(row) for row in rows]
 
 
-def check_out_student(student_id, date=None, time_out=None):
+def check_out_student(student_id, date=None, time_out=None, session_id=None):
     student_id = sanitize_id(student_id)
     if not student_id:
         return False, 'Invalid student ID'
@@ -373,16 +375,34 @@ def check_out_student(student_id, date=None, time_out=None):
         date = datetime.now().strftime('%Y-%m-%d')
     try:
         conn = get_db()
-        row = conn.execute(
-            'SELECT id FROM attendance WHERE student_id = ? AND date = ?',
-            (student_id, date),
-        ).fetchone()
+        if session_id is not None:
+            row = conn.execute(
+                '''SELECT id FROM attendance
+                   WHERE student_id = ? AND date = ? AND session_id = ?
+                     AND session_id IN (
+                         SELECT id FROM class_sessions WHERE ended_at IS NULL
+                     )
+                     AND status IN ('Present', 'Late')''',
+                (student_id, date, session_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                '''SELECT id FROM attendance
+                   WHERE student_id = ? AND date = ? AND status IN ('Present', 'Late')
+                     AND (
+                         session_id IS NULL OR session_id IN (
+                             SELECT id FROM class_sessions WHERE ended_at IS NULL
+                         )
+                     )
+                   ORDER BY session_id DESC LIMIT 1''',
+                (student_id, date),
+            ).fetchone()
         if not row:
             conn.close()
             return False, 'No attendance record found for today'
         conn.execute(
-            'UPDATE attendance SET time_out = ?, status = ? WHERE student_id = ? AND date = ?',
-            (time_out, 'Present', student_id, date),
+            'UPDATE attendance SET time_out = ? WHERE id = ?',
+            (time_out, row['id']),
         )
         conn.commit()
         conn.close()
@@ -787,7 +807,7 @@ def get_attendance_summary():
     rows = conn.execute(
         '''SELECT s.class_name AS class,
                   COUNT(DISTINCT s.id) AS total_students,
-                  COUNT(DISTINCT CASE WHEN a.status = 'Present' THEN s.id END) AS present_today
+                  COUNT(DISTINCT CASE WHEN a.status IN ('Present', 'Late') THEN s.id END) AS present_today
            FROM students s
            LEFT JOIN attendance a ON s.student_id = a.student_id AND a.date = ?
            GROUP BY s.class_name
@@ -807,13 +827,23 @@ def get_attendance_summary():
 @app.route('/api/attendance/check-out', methods=['POST'])
 def check_out_api():
     payload = request.get_json(silent=True) or request.form.to_dict(flat=True)
+    if not isinstance(payload, dict):
+        return api_error('Request body must be an object', 400)
     student_id = (payload or {}).get('student_id') or request.form.get('student_id')
     time_out = (payload or {}).get('time_out') or request.form.get('time_out')
+    raw_session_id = (payload or {}).get('session_id')
 
     if not student_id:
         return api_error('student_id is required', 400)
+    if raw_session_id is not None and not str(raw_session_id).isdigit():
+        return api_error('session_id must be a positive integer', 400)
 
-    success, message = check_out_student(student_id, time_out=time_out)
+    session_id = int(raw_session_id) if raw_session_id is not None else None
+    success, message = check_out_student(
+        student_id,
+        time_out=time_out,
+        session_id=session_id,
+    )
     if not success:
         return api_error(message, 400)
 
@@ -822,6 +852,7 @@ def check_out_api():
         'message': message,
         'student_id': sanitize_id(student_id),
         'time_out': time_out or datetime.now().strftime('%H:%M:%S'),
+        'session_id': session_id,
     })
 
 
